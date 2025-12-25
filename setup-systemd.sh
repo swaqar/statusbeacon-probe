@@ -10,7 +10,7 @@
 # - Proper logging with journald
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/setup-systemd.sh | sudo bash -s -- <region> <secret> [port]
+#   curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/setup-systemd.sh | sudo bash -s -- <region> <secret> [port]
 #
 # Example:
 #   sudo bash setup-systemd.sh sgp1 your-secret-key 3002
@@ -88,12 +88,12 @@ EOF
 # Download probe.js from repo or create it
 echo "📝 Creating probe.js..."
 if command -v wget &> /dev/null; then
-    wget -q https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/probe.js -O probe.js || {
+    wget -q https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -O probe.js || {
         echo "⚠️  Failed to download probe.js from GitHub, using embedded version..."
         create_probe_js
     }
 elif command -v curl &> /dev/null; then
-    curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/probe.js -o probe.js || {
+    curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -o probe.js || {
         echo "⚠️  Failed to download probe.js from GitHub, using embedded version..."
         create_probe_js
     }
@@ -306,7 +306,7 @@ echo "🔧 Creating systemd service..."
 cat > /etc/systemd/system/statusbeacon-probe.service << EOF
 [Unit]
 Description=StatusBeacon Probe Service
-Documentation=https://github.com/swaqar/status-beacon-47
+Documentation=https://github.com/swaqar/statusbeacon-probe
 After=network-online.target
 Wants=network-online.target
 

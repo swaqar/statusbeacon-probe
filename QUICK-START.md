@@ -5,13 +5,13 @@
 SSH into your DigitalOcean droplet and run:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/setup-systemd.sh | sudo bash -s -- <region> <secret> 3002
+curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/setup-systemd.sh | sudo bash -s -- <region> <secret> 3002
 ```
 
 ### Example: Install probe in Singapore (sgp1)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/setup-systemd.sh | sudo bash -s -- sgp1 mySecretKey123 3002
+curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/setup-systemd.sh | sudo bash -s -- sgp1 mySecretKey123 3002
 ```
 
 **Replace:**
@@ -75,7 +75,7 @@ sudo systemctl restart statusbeacon-probe
 
 ### Method 2: Use Update Script
 ```bash
-curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/update-config.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/update-config.sh | sudo bash
 ```
 
 ---
@@ -198,7 +198,7 @@ sudo journalctl -u statusbeacon-probe --since "1 hour ago"
 
 ### Reinstall (keeps configuration)
 ```bash
-curl -sSL https://raw.githubusercontent.com/swaqar/status-beacon-47/main/probe/setup-systemd.sh | sudo bash -s -- sgp1 mySecret 3002
+curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/setup-systemd.sh | sudo bash -s -- sgp1 mySecret 3002
 ```
 
 ### Complete Uninstall
@@ -227,4 +227,4 @@ sudo systemctl daemon-reload
 ## 📚 More Information
 
 - Full README: [probe/README.md](README.md)
-- Main project: [GitHub Repository](https://github.com/swaqar/status-beacon-47)
+- Main project: [GitHub Repository](https://github.com/swaqar/statusbeacon-probe)

@@ -359,7 +359,6 @@ sudo journalctl -u statusbeacon-probe -f
 ## 📚 Documentation
 
 - [Quick Start Guide](QUICK-START.md) - Fast deployment guide
-- [Main Application](https://github.com/swaqar/status-beacon-47) - StatusBeacon monitoring platform
 
 ---
 
