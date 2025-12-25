@@ -1,0 +1,12 @@
+{
+  "name": "statusbeacon-probe",
+  "version": "1.0.0",
+  "description": "Lightweight regional probe for StatusBeacon monitoring",
+  "main": "probe.js",
+  "scripts": {
+    "start": "node probe.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
