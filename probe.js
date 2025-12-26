@@ -46,15 +46,15 @@ function detectGeoBlocking(statusCode, errorMessage, responseBody) {
 
 // Perform HTTP check
 async function performHttpCheck(config) {
-  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {} } = config;
+  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs } = config;
   const startTime = Date.now();
-  
+
   return new Promise((resolve) => {
     try {
       const parsedUrl = new URL(url);
       const isHttps = parsedUrl.protocol === 'https:';
       const httpModule = isHttps ? https : http;
-      
+
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (isHttps ? 443 : 80),
@@ -74,16 +74,24 @@ async function performHttpCheck(config) {
         res.on('end', () => {
           const responseTime = Date.now() - startTime;
           const statusCode = res.statusCode;
-          const isUp = statusCode === expectedStatus || 
+          const isUp = statusCode === expectedStatus ||
                        (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
-          
+
+          // Check if response time exceeds degraded threshold (only if status is currently 'up')
+          let status = isUp ? 'up' : 'down';
+          let errorMsg = isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`;
+          if (status === 'up' && degradedThresholdMs && responseTime > degradedThresholdMs) {
+            status = 'degraded';
+            errorMsg = `Response time ${responseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
+          }
+
           const geoBlocking = detectGeoBlocking(statusCode, '', body);
-          
+
           resolve({
-            status: isUp ? 'up' : 'down',
+            status,
             statusCode,
             responseTimeMs: responseTime,
-            error: isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`,
+            error: errorMsg,
             geoBlocking,
             region: PROBE_REGION
           });
@@ -132,21 +140,30 @@ async function performHttpCheck(config) {
 
 // Perform TCP check
 async function performTcpCheck(config) {
-  const { host, port, timeout = 10000 } = config;
+  const { host, port, timeout = 10000, degradedThresholdMs } = config;
   const startTime = Date.now();
-  
+
   return new Promise((resolve) => {
     const socket = new net.Socket();
-    
+
     socket.setTimeout(timeout);
-    
+
     socket.on('connect', () => {
       const responseTime = Date.now() - startTime;
       socket.destroy();
+
+      // Check if response time exceeds degraded threshold
+      let status = 'up';
+      let errorMsg = null;
+      if (degradedThresholdMs && responseTime > degradedThresholdMs) {
+        status = 'degraded';
+        errorMsg = `Response time ${responseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
+      }
+
       resolve({
-        status: 'up',
+        status,
         responseTimeMs: responseTime,
-        error: null,
+        error: errorMsg,
         region: PROBE_REGION
       });
     });
@@ -213,25 +230,25 @@ app.get('/health', (req, res) => {
 // Check endpoint (auth required)
 app.post('/check', authMiddleware, async (req, res) => {
   try {
-    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, monitorType, host, port } = req.body;
-    
+    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port } = req.body;
+
     let result;
-    
+
     if (monitorType === 'tcp' || (!url && host && port)) {
-      result = await performTcpCheck({ host, port, timeout });
+      result = await performTcpCheck({ host, port, timeout, degradedThresholdMs });
     } else if (url) {
-      result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors });
+      result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs });
     } else {
       return res.status(400).json({ error: 'Missing url or host/port' });
     }
-    
+
     res.json(result);
   } catch (error) {
     console.error('Check error:', error);
-    res.status(500).json({ 
-      status: 'error', 
+    res.status(500).json({
+      status: 'error',
       error: error.message,
-      region: PROBE_REGION 
+      region: PROBE_REGION
     });
   }
 });
