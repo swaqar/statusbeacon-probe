@@ -64,14 +64,41 @@ if ! id "$SERVICE_USER" &>/dev/null; then
     useradd --system --no-create-home --shell /bin/false $SERVICE_USER
 fi
 
-# Create install directory
-echo "📁 Creating install directory: $INSTALL_DIR"
-mkdir -p $INSTALL_DIR
-cd $INSTALL_DIR
+# Check if this is an update or fresh install
+if [ -d "$INSTALL_DIR" ]; then
+    echo "📦 Existing installation detected - updating code..."
+    cd $INSTALL_DIR
 
-# Create package.json
-echo "📝 Creating package.json..."
-cat > package.json << 'EOF'
+    # If it's a git repo, pull latest changes
+    if [ -d ".git" ]; then
+        echo "🔄 Pulling latest code from GitHub..."
+        git pull origin main
+    else
+        # Not a git repo, download all files
+        echo "📥 Downloading latest code files..."
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -o probe.js
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/userAgents.js -o userAgents.js
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/geoBlockDetection.js -o geoBlockDetection.js
+    fi
+else
+    # Fresh install - clone from git
+    echo "📁 Fresh installation - cloning from GitHub..."
+
+    # Install git if not present
+    if ! command -v git &> /dev/null; then
+        echo "📦 Installing git..."
+        apt-get install -y git
+    fi
+
+    # Clone repository
+    git clone https://github.com/swaqar/statusbeacon-probe.git $INSTALL_DIR
+    cd $INSTALL_DIR
+fi
+
+# Ensure package.json exists (for non-git downloads)
+if [ ! -f "package.json" ]; then
+    echo "📝 Creating package.json..."
+    cat > package.json << 'EOF'
 {
   "name": "statusbeacon-probe",
   "version": "1.0.0",
@@ -84,22 +111,6 @@ cat > package.json << 'EOF'
   }
 }
 EOF
-
-# Download probe.js from repo or create it
-echo "📝 Creating probe.js..."
-if command -v wget &> /dev/null; then
-    wget -q https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -O probe.js || {
-        echo "⚠️  Failed to download probe.js from GitHub, using embedded version..."
-        create_probe_js
-    }
-elif command -v curl &> /dev/null; then
-    curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -o probe.js || {
-        echo "⚠️  Failed to download probe.js from GitHub, using embedded version..."
-        create_probe_js
-    }
-else
-    echo "⚠️  wget/curl not found, using embedded version..."
-    create_probe_js
 fi
 
 # Function to create probe.js if download fails
