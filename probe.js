@@ -19,6 +19,7 @@ const net = require('net');
 const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
 const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection');
+const { resolveDns, extractHostname } = require('./dnsMonitoring');
 
 const app = express();
 app.use(express.json());
@@ -30,7 +31,50 @@ const PROBE_REGION = process.env.PROBE_REGION || 'unknown';
 // Perform HTTP check
 async function performHttpCheck(config) {
   const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs } = config;
-  const startTime = Date.now();
+
+  // Step 1: Perform DNS resolution first
+  const hostname = extractHostname(url);
+  const dnsResult = await resolveDns(hostname, 5000);
+
+  const dnsResponseTimeMs = dnsResult.responseTimeMs;
+  const dnsResolvedIps = dnsResult.ips;
+
+  // Check for DNS failure
+  if (!dnsResult.success) {
+    return {
+      status: 'dns_failure',
+      statusCode: null,
+      responseTimeMs: dnsResult.responseTimeMs,
+      error: `DNS resolution failed: ${dnsResult.error}`,
+      isGeoBlocked: false,
+      geoBlockingIndicators: [],
+      detectionMetadata: null,
+      dnsResponseTimeMs: dnsResult.responseTimeMs,
+      dnsResolvedIps: [],
+      region: PROBE_REGION
+    };
+  }
+
+  // Check for DNS hijacking
+  if (dnsResult.hijacked) {
+    return {
+      status: 'dns_failure',
+      statusCode: null,
+      responseTimeMs: dnsResult.responseTimeMs,
+      error: `DNS hijacking detected: ${dnsResult.hijackReason}`,
+      isGeoBlocked: false,
+      geoBlockingIndicators: [],
+      detectionMetadata: null,
+      dnsResponseTimeMs: dnsResult.responseTimeMs,
+      dnsResolvedIps: dnsResult.ips,
+      region: PROBE_REGION
+    };
+  }
+
+  console.log(`[DNS] Resolved ${hostname} to ${dnsResult.ips.join(', ')} in ${dnsResult.responseTimeMs}ms${dnsResult.cached ? ' (cached)' : ''}`);
+
+  // Step 2: Perform HTTP check
+  const httpStartTime = Date.now();
 
   return new Promise((resolve) => {
     try {
@@ -71,7 +115,8 @@ async function performHttpCheck(config) {
         let body = '';
         res.on('data', chunk => { body += chunk.toString().slice(0, 10000); }); // Limit body to 10KB
         res.on('end', () => {
-          const responseTime = Date.now() - startTime;
+          const httpResponseTime = Date.now() - httpStartTime;
+          const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
           const statusCode = res.statusCode;
           const isUp = statusCode === expectedStatus ||
                        (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
@@ -84,7 +129,7 @@ async function performHttpCheck(config) {
             statusCode,
             responseHeaders,
             body,
-            responseTime
+            httpResponseTime
           );
 
           // Check if response time exceeds degraded threshold (only if status is currently 'up')
@@ -96,9 +141,9 @@ async function performHttpCheck(config) {
             errorMsg = getBlockingMessage(geoBlockDetection);
           }
 
-          if (status === 'up' && degradedThresholdMs && responseTime > degradedThresholdMs) {
+          if (status === 'up' && degradedThresholdMs && totalResponseTime > degradedThresholdMs) {
             status = 'degraded';
-            errorMsg = `Response time ${responseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
+            errorMsg = `Response time ${totalResponseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
           }
 
           // Build detection metadata
@@ -110,26 +155,31 @@ async function performHttpCheck(config) {
             };
           }
 
+          console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
+
           resolve({
             status,
             statusCode,
-            responseTimeMs: responseTime,
+            responseTimeMs: totalResponseTime,
             error: errorMsg,
             // Legacy fields for backward compatibility
             isGeoBlocked: geoBlockDetection.detected || false,
             geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
             // New enhanced detection
             detectionMetadata,
+            dnsResponseTimeMs,
+            dnsResolvedIps,
             region: PROBE_REGION
           });
         });
       });
 
       req.on('error', (error) => {
-        const responseTime = Date.now() - startTime;
+        const httpResponseTime = Date.now() - httpStartTime;
+        const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
 
         // Try to detect geo-blocking from error message
-        const geoBlockDetection = detectGeoBlocking(0, {}, error.message, responseTime);
+        const geoBlockDetection = detectGeoBlocking(0, {}, error.message, httpResponseTime);
 
         let detectionMetadata = null;
         if (geoBlockDetection.detected) {
@@ -142,11 +192,13 @@ async function performHttpCheck(config) {
         resolve({
           status: 'down',
           statusCode: 0,
-          responseTimeMs: responseTime,
+          responseTimeMs: totalResponseTime,
           error: error.message,
           isGeoBlocked: geoBlockDetection.detected || false,
           geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
           detectionMetadata,
+          dnsResponseTimeMs,
+          dnsResolvedIps,
           region: PROBE_REGION
         });
       });
@@ -156,25 +208,31 @@ async function performHttpCheck(config) {
         resolve({
           status: 'down',
           statusCode: 0,
-          responseTimeMs: timeout,
+          responseTimeMs: timeout + dnsResponseTimeMs,
           error: 'Request timeout',
           isGeoBlocked: false,
           geoBlockingIndicators: [],
           detectionMetadata: null,
+          dnsResponseTimeMs,
+          dnsResolvedIps,
           region: PROBE_REGION
         });
       });
 
       req.end();
     } catch (error) {
+      const httpResponseTime = Date.now() - httpStartTime;
+      const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
       resolve({
         status: 'down',
         statusCode: 0,
-        responseTimeMs: Date.now() - startTime,
+        responseTimeMs: totalResponseTime,
         error: error.message,
         isGeoBlocked: false,
         geoBlockingIndicators: [],
         detectionMetadata: null,
+        dnsResponseTimeMs,
+        dnsResolvedIps,
         region: PROBE_REGION
       });
     }
