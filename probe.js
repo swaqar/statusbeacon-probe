@@ -18,6 +18,7 @@ const https = require('https');
 const net = require('net');
 const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
+const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection');
 
 const app = express();
 app.use(express.json());
@@ -25,25 +26,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3002;
 const PROBE_SECRET = process.env.PROBE_SECRET || '';
 const PROBE_REGION = process.env.PROBE_REGION || 'unknown';
-
-// Geo-blocking detection patterns
-const GEO_BLOCKING_STATUS_CODES = [403, 451, 406];
-const GEO_BLOCKING_PATTERNS = [
-  'geo', 'region', 'country', 'location', 'blocked', 'restricted',
-  'not available', 'access denied', 'forbidden', 'cloudflare'
-];
-
-function detectGeoBlocking(statusCode, errorMessage, responseBody) {
-  if (GEO_BLOCKING_STATUS_CODES.includes(statusCode)) {
-    const combined = `${errorMessage || ''} ${responseBody || ''}`.toLowerCase();
-    for (const pattern of GEO_BLOCKING_PATTERNS) {
-      if (combined.includes(pattern)) {
-        return { detected: true, reason: `Possible geo-blocking: ${pattern} detected in response` };
-      }
-    }
-  }
-  return { detected: false };
-}
 
 // Perform HTTP check
 async function performHttpCheck(config) {
@@ -87,29 +69,57 @@ async function performHttpCheck(config) {
 
       const req = httpModule.request(options, (res) => {
         let body = '';
-        res.on('data', chunk => { body += chunk.toString().slice(0, 1000); }); // Limit body size
+        res.on('data', chunk => { body += chunk.toString().slice(0, 10000); }); // Limit body to 10KB
         res.on('end', () => {
           const responseTime = Date.now() - startTime;
           const statusCode = res.statusCode;
           const isUp = statusCode === expectedStatus ||
                        (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
 
+          // Extract response headers
+          const responseHeaders = res.headers || {};
+
+          // Enhanced geo-blocking detection
+          const geoBlockDetection = detectGeoBlocking(
+            statusCode,
+            responseHeaders,
+            body,
+            responseTime
+          );
+
           // Check if response time exceeds degraded threshold (only if status is currently 'up')
           let status = isUp ? 'up' : 'down';
           let errorMsg = isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`;
+
+          // If geo-blocking detected, update error message
+          if (geoBlockDetection.detected) {
+            errorMsg = getBlockingMessage(geoBlockDetection);
+          }
+
           if (status === 'up' && degradedThresholdMs && responseTime > degradedThresholdMs) {
             status = 'degraded';
             errorMsg = `Response time ${responseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
           }
 
-          const geoBlocking = detectGeoBlocking(statusCode, '', body);
+          // Build detection metadata
+          let detectionMetadata = null;
+          if (geoBlockDetection.detected) {
+            detectionMetadata = {
+              geoBlocking: geoBlockDetection,
+              detectedAt: new Date().toISOString(),
+            };
+          }
 
           resolve({
             status,
             statusCode,
             responseTimeMs: responseTime,
             error: errorMsg,
-            geoBlocking,
+            // Legacy fields for backward compatibility
+            isGeoBlocked: geoBlockDetection.detected || false,
+            geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
+            // New enhanced detection
+            detectionMetadata,
             region: PROBE_REGION
           });
         });
@@ -117,14 +127,26 @@ async function performHttpCheck(config) {
 
       req.on('error', (error) => {
         const responseTime = Date.now() - startTime;
-        const geoBlocking = detectGeoBlocking(0, error.message, '');
-        
+
+        // Try to detect geo-blocking from error message
+        const geoBlockDetection = detectGeoBlocking(0, {}, error.message, responseTime);
+
+        let detectionMetadata = null;
+        if (geoBlockDetection.detected) {
+          detectionMetadata = {
+            geoBlocking: geoBlockDetection,
+            detectedAt: new Date().toISOString(),
+          };
+        }
+
         resolve({
           status: 'down',
           statusCode: 0,
           responseTimeMs: responseTime,
           error: error.message,
-          geoBlocking,
+          isGeoBlocked: geoBlockDetection.detected || false,
+          geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
+          detectionMetadata,
           region: PROBE_REGION
         });
       });
@@ -136,7 +158,9 @@ async function performHttpCheck(config) {
           statusCode: 0,
           responseTimeMs: timeout,
           error: 'Request timeout',
-          geoBlocking: { detected: false },
+          isGeoBlocked: false,
+          geoBlockingIndicators: [],
+          detectionMetadata: null,
           region: PROBE_REGION
         });
       });
@@ -148,7 +172,9 @@ async function performHttpCheck(config) {
         statusCode: 0,
         responseTimeMs: Date.now() - startTime,
         error: error.message,
-        geoBlocking: { detected: false },
+        isGeoBlocked: false,
+        geoBlockingIndicators: [],
+        detectionMetadata: null,
         region: PROBE_REGION
       });
     }
