@@ -77,7 +77,16 @@ async function performHttpCheck(config) {
   const httpStartTime = Date.now();
 
   return new Promise((resolve) => {
+    let resolved = false;
+    const safeResolve = (result) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(result);
+      }
+    };
+
     try {
+      // Parse URL first (can throw)
       const parsedUrl = new URL(url);
       const isHttps = parsedUrl.protocol === 'https:';
       const httpModule = isHttps ? https : http;
@@ -157,7 +166,7 @@ async function performHttpCheck(config) {
 
           console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
 
-          resolve({
+          safeResolve({
             status,
             statusCode,
             responseTimeMs: totalResponseTime,
@@ -189,7 +198,7 @@ async function performHttpCheck(config) {
           };
         }
 
-        resolve({
+        safeResolve({
           status: 'down',
           statusCode: 0,
           responseTimeMs: totalResponseTime,
@@ -205,7 +214,7 @@ async function performHttpCheck(config) {
 
       req.on('timeout', () => {
         req.destroy();
-        resolve({
+        safeResolve({
           status: 'down',
           statusCode: 0,
           responseTimeMs: timeout + dnsResponseTimeMs,
@@ -223,7 +232,7 @@ async function performHttpCheck(config) {
     } catch (error) {
       const httpResponseTime = Date.now() - httpStartTime;
       const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-      resolve({
+      safeResolve({
         status: 'down',
         statusCode: 0,
         responseTimeMs: totalResponseTime,
