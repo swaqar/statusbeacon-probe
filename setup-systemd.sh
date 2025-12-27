@@ -79,6 +79,7 @@ if [ -d "$INSTALL_DIR" ]; then
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -o probe.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/userAgents.js -o userAgents.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/geoBlockDetection.js -o geoBlockDetection.js
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/dnsMonitoring.js -o dnsMonitoring.js
     fi
 else
     # Fresh install - clone from git
