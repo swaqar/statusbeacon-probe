@@ -17,6 +17,7 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 const { URL } = require('url');
+const { getHeadersObject } = require('./userAgents');
 
 const app = express();
 app.use(express.json());
@@ -55,6 +56,9 @@ async function performHttpCheck(config) {
       const isHttps = parsedUrl.protocol === 'https:';
       const httpModule = isHttps ? https : http;
 
+      // Get realistic browser headers
+      const defaultHeaders = getHeadersObject('rotate');
+
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (isHttps ? 443 : 80),
@@ -62,23 +66,23 @@ async function performHttpCheck(config) {
         method: method,
         timeout: timeout,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Windows"',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Upgrade-Insecure-Requests': '1',
-          ...headers
+          ...defaultHeaders,
+          ...headers  // Custom headers override defaults
         },
-        rejectUnauthorized: !config.ignoreSslErrors
+        // Secure SSL validation: Even if ignoreSslErrors is true, hostname must match
+        rejectUnauthorized: !config.ignoreSslErrors,
+        checkServerIdentity: config.ignoreSslErrors ? (hostname, cert) => {
+          // Custom validation when SSL errors are ignored
+          // ALWAYS validate hostname to prevent MITM attacks
+          const tls = require('tls');
+          const hostnameCheck = tls.checkServerIdentity(hostname, cert);
+          if (hostnameCheck) {
+            // Hostname mismatch - reject even if ignoreSslErrors is true
+            return hostnameCheck;
+          }
+          // Hostname matches - allow self-signed/expired certs
+          return undefined;
+        } : undefined
       };
 
       const req = httpModule.request(options, (res) => {
