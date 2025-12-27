@@ -94,6 +94,15 @@ async function performHttpCheck(config) {
       // Get realistic browser headers
       const defaultHeaders = getHeadersObject('rotate');
 
+      // Create agent to force HTTP/1.1 (prevents HTTP/2 errors)
+      const agent = isHttps ? new https.Agent({
+        // Force HTTP/1.1 by disabling HTTP/2
+        ALPNProtocols: ['http/1.1'],
+        maxVersion: 'TLSv1.3',
+        minVersion: 'TLSv1.2',
+        rejectUnauthorized: !config.ignoreSslErrors,
+      }) : undefined;
+
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (isHttps ? 443 : 80),
@@ -104,9 +113,7 @@ async function performHttpCheck(config) {
           ...defaultHeaders,
           ...headers  // Custom headers override defaults
         },
-        // Force HTTP/1.1 to avoid HTTP/2 INTERNAL_ERROR issues (like tesco.com)
-        // HTTP/2 can cause "stream not closed cleanly" errors that crash Node.js
-        ALPNProtocols: ['http/1.1'],
+        agent: agent,  // Use custom agent for HTTPS
         // Secure SSL validation: Even if ignoreSslErrors is true, hostname must match
         rejectUnauthorized: !config.ignoreSslErrors,
         checkServerIdentity: config.ignoreSslErrors ? (hostname, cert) => {
