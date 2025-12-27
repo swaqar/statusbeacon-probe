@@ -94,15 +94,6 @@ async function performHttpCheck(config) {
       // Get realistic browser headers
       const defaultHeaders = getHeadersObject('rotate');
 
-      // Create agent to force HTTP/1.1 (prevents HTTP/2 errors)
-      const agent = isHttps ? new https.Agent({
-        // Force HTTP/1.1 by disabling HTTP/2
-        ALPNProtocols: ['http/1.1'],
-        maxVersion: 'TLSv1.3',
-        minVersion: 'TLSv1.2',
-        rejectUnauthorized: !config.ignoreSslErrors,
-      }) : undefined;
-
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (isHttps ? 443 : 80),
@@ -111,9 +102,9 @@ async function performHttpCheck(config) {
         timeout: timeout,
         headers: {
           ...defaultHeaders,
-          ...headers  // Custom headers override defaults
+          ...headers,  // Custom headers override defaults
+          'Connection': 'close'  // Force connection close to avoid HTTP/2
         },
-        agent: agent,  // Use custom agent for HTTPS
         // Secure SSL validation: Even if ignoreSslErrors is true, hostname must match
         rejectUnauthorized: !config.ignoreSslErrors,
         checkServerIdentity: config.ignoreSslErrors ? (hostname, cert) => {
@@ -129,6 +120,8 @@ async function performHttpCheck(config) {
           return undefined;
         } : undefined
       };
+
+      // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
       const req = httpModule.request(options, (res) => {
         let body = '';

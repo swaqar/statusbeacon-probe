@@ -309,6 +309,7 @@ PORT=$PORT
 PROBE_SECRET=$SECRET
 PROBE_REGION=$REGION
 NODE_ENV=production
+NODE_NO_HTTP2=1
 EOF
 
 chmod 600 /etc/statusbeacon-probe.env
