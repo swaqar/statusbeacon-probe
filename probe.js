@@ -122,64 +122,86 @@ async function performHttpCheck(config) {
 
       const req = httpModule.request(options, (res) => {
         let body = '';
-        res.on('data', chunk => { body += chunk.toString().slice(0, 10000); }); // Limit body to 10KB
+        res.on('data', chunk => {
+          try {
+            body += chunk.toString().slice(0, 10000); // Limit body to 10KB
+          } catch (e) {
+            console.error('[HTTP] Error processing response chunk:', e.message);
+          }
+        });
         res.on('end', () => {
-          const httpResponseTime = Date.now() - httpStartTime;
-          const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-          const statusCode = res.statusCode;
-          const isUp = statusCode === expectedStatus ||
-                       (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
+          try {
+            const httpResponseTime = Date.now() - httpStartTime;
+            const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
+            const statusCode = res.statusCode;
+            const isUp = statusCode === expectedStatus ||
+                         (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
 
-          // Extract response headers
-          const responseHeaders = res.headers || {};
+            // Extract response headers
+            const responseHeaders = res.headers || {};
 
-          // Enhanced geo-blocking detection
-          const geoBlockDetection = detectGeoBlocking(
-            statusCode,
-            responseHeaders,
-            body,
-            httpResponseTime
-          );
+            // Enhanced geo-blocking detection
+            const geoBlockDetection = detectGeoBlocking(
+              statusCode,
+              responseHeaders,
+              body,
+              httpResponseTime
+            );
 
-          // Check if response time exceeds degraded threshold (only if status is currently 'up')
-          let status = isUp ? 'up' : 'down';
-          let errorMsg = isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`;
+            // Check if response time exceeds degraded threshold (only if status is currently 'up')
+            let status = isUp ? 'up' : 'down';
+            let errorMsg = isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`;
 
-          // If geo-blocking detected, update error message
-          if (geoBlockDetection.detected) {
-            errorMsg = getBlockingMessage(geoBlockDetection);
+            // If geo-blocking detected, update error message
+            if (geoBlockDetection.detected) {
+              errorMsg = getBlockingMessage(geoBlockDetection);
+            }
+
+            if (status === 'up' && degradedThresholdMs && totalResponseTime > degradedThresholdMs) {
+              status = 'degraded';
+              errorMsg = `Response time ${totalResponseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
+            }
+
+            // Build detection metadata
+            let detectionMetadata = null;
+            if (geoBlockDetection.detected) {
+              detectionMetadata = {
+                geoBlocking: geoBlockDetection,
+                detectedAt: new Date().toISOString(),
+              };
+            }
+
+            console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
+
+            safeResolve({
+              status,
+              statusCode,
+              responseTimeMs: totalResponseTime,
+              error: errorMsg,
+              // Legacy fields for backward compatibility
+              isGeoBlocked: geoBlockDetection.detected || false,
+              geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
+              // New enhanced detection
+              detectionMetadata,
+              dnsResponseTimeMs,
+              dnsResolvedIps,
+              region: PROBE_REGION
+            });
+          } catch (endError) {
+            console.error('[HTTP] Error in end handler:', endError.message);
+            safeResolve({
+              status: 'down',
+              statusCode: 0,
+              responseTimeMs: Date.now() - httpStartTime + dnsResponseTimeMs,
+              error: `Response processing error: ${endError.message}`,
+              isGeoBlocked: false,
+              geoBlockingIndicators: [],
+              detectionMetadata: null,
+              dnsResponseTimeMs,
+              dnsResolvedIps,
+              region: PROBE_REGION
+            });
           }
-
-          if (status === 'up' && degradedThresholdMs && totalResponseTime > degradedThresholdMs) {
-            status = 'degraded';
-            errorMsg = `Response time ${totalResponseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
-          }
-
-          // Build detection metadata
-          let detectionMetadata = null;
-          if (geoBlockDetection.detected) {
-            detectionMetadata = {
-              geoBlocking: geoBlockDetection,
-              detectedAt: new Date().toISOString(),
-            };
-          }
-
-          console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
-
-          safeResolve({
-            status,
-            statusCode,
-            responseTimeMs: totalResponseTime,
-            error: errorMsg,
-            // Legacy fields for backward compatibility
-            isGeoBlocked: geoBlockDetection.detected || false,
-            geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
-            // New enhanced detection
-            detectionMetadata,
-            dnsResponseTimeMs,
-            dnsResolvedIps,
-            region: PROBE_REGION
-          });
         });
       });
 
