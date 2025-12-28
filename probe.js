@@ -118,8 +118,7 @@ async function performHttpCheck(config) {
         timeout: timeout,
         headers: {
           ...defaultHeaders,
-          ...headers,  // Custom headers override defaults
-          'Connection': 'close'  // Force connection close
+          ...headers  // Custom headers override defaults
         },
         rejectUnauthorized: !config.ignoreSslErrors
       };
