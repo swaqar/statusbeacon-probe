@@ -76,6 +76,7 @@ if [ -d "$INSTALL_DIR" ]; then
     else
         # Not a git repo, download all files
         echo "📥 Downloading latest code files..."
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/package.json -o package.json
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/probe.js -o probe.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/userAgents.js -o userAgents.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/geoBlockDetection.js -o geoBlockDetection.js
