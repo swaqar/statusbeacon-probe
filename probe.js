@@ -119,23 +119,12 @@ async function performHttpCheck(config) {
         headers: {
           ...defaultHeaders,
           ...headers,  // Custom headers override defaults
-          'Connection': 'close'  // Force connection close to avoid HTTP/2
+          'Connection': 'close'  // Force connection close
         },
-        // Secure SSL validation: Even if ignoreSslErrors is true, hostname must match
-        rejectUnauthorized: !config.ignoreSslErrors,
-        checkServerIdentity: config.ignoreSslErrors ? (hostname, cert) => {
-          // Custom validation when SSL errors are ignored
-          // ALWAYS validate hostname to prevent MITM attacks
-          const tls = require('tls');
-          const hostnameCheck = tls.checkServerIdentity(hostname, cert);
-          if (hostnameCheck) {
-            // Hostname mismatch - reject even if ignoreSslErrors is true
-            return hostnameCheck;
-          }
-          // Hostname matches - allow self-signed/expired certs
-          return undefined;
-        } : undefined
+        rejectUnauthorized: !config.ignoreSslErrors
       };
+
+      console.log(`[HTTP] Options created, ignoreSslErrors: ${config.ignoreSslErrors}`);
 
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
