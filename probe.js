@@ -21,6 +21,7 @@ const { getHeadersObject } = require('./userAgents');
 const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection');
 const { resolveDns, extractHostname } = require('./dnsMonitoring');
 const { getCookieHeader, storeCookies } = require('./cookieJar');
+const { followRedirects, detectGeoRedirect, REDIRECT_STATUS_CODES } = require('./redirectTracking');
 
 const app = express();
 app.use(express.json());
@@ -72,6 +73,9 @@ async function performHttpCheck(config) {
       detectionMetadata: null,
       dnsResponseTimeMs: dnsResult.responseTimeMs,
       dnsResolvedIps: [],
+      redirectCount: 0,
+      finalUrl: url,
+      redirectChain: null,
       region: PROBE_REGION
     };
   }
@@ -88,6 +92,9 @@ async function performHttpCheck(config) {
       detectionMetadata: null,
       dnsResponseTimeMs: dnsResult.responseTimeMs,
       dnsResolvedIps: dnsResult.ips,
+      redirectCount: 0,
+      finalUrl: url,
+      redirectChain: null,
       region: PROBE_REGION
     };
   }
@@ -164,7 +171,7 @@ async function performHttpCheck(config) {
             console.error('[HTTP] Error processing response chunk:', e.message);
           }
         });
-        res.on('end', () => {
+        res.on('end', async () => {
           try {
             const httpResponseTime = Date.now() - httpStartTime;
             const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
@@ -217,6 +224,52 @@ async function performHttpCheck(config) {
               };
             }
 
+            // Redirect tracking: Check if this is a redirect response
+            let redirectCount = 0;
+            let finalUrl = url;
+            let redirectChain = null;
+
+            if (REDIRECT_STATUS_CODES.includes(statusCode) && responseHeaders.location) {
+              console.log(`[Redirect] Detected ${statusCode} redirect to ${responseHeaders.location}`);
+
+              // Build initial hop
+              const initialHop = {
+                url: url,
+                statusCode: statusCode,
+                location: responseHeaders.location,
+                responseTimeMs: httpResponseTime
+              };
+
+              // Follow the redirect chain
+              try {
+                const redirectResult = await followRedirects(url, {
+                  method,
+                  headers: requestHeaders,
+                  timeout,
+                  rejectUnauthorized: !config.ignoreSslErrors
+                });
+
+                redirectCount = redirectResult.redirectCount;
+                finalUrl = redirectResult.finalUrl;
+                redirectChain = redirectResult.redirectChain;
+
+                // Check for geo-based redirects
+                const geoRedirect = detectGeoRedirect(redirectChain);
+                if (geoRedirect.detected) {
+                  console.log(`[Redirect] Geo-based redirect detected: ${geoRedirect.reason}`);
+                  if (!detectionMetadata) {
+                    detectionMetadata = {};
+                  }
+                  detectionMetadata.geoRedirect = geoRedirect;
+                }
+
+                // Log redirect chain
+                console.log(`[Redirect] Followed ${redirectCount} redirect(s), final URL: ${finalUrl}`);
+              } catch (redirectError) {
+                console.error(`[Redirect] Error following redirects: ${redirectError.message}`);
+              }
+            }
+
             console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
 
             safeResolve({
@@ -231,6 +284,10 @@ async function performHttpCheck(config) {
               detectionMetadata,
               dnsResponseTimeMs,
               dnsResolvedIps,
+              // Redirect tracking
+              redirectCount,
+              finalUrl,
+              redirectChain,
               region: PROBE_REGION
             });
           } catch (endError) {
@@ -245,6 +302,9 @@ async function performHttpCheck(config) {
               detectionMetadata: null,
               dnsResponseTimeMs,
               dnsResolvedIps,
+              redirectCount: 0,
+              finalUrl: url,
+              redirectChain: null,
               region: PROBE_REGION
             });
           }
@@ -276,6 +336,9 @@ async function performHttpCheck(config) {
           detectionMetadata,
           dnsResponseTimeMs,
           dnsResolvedIps,
+          redirectCount: 0,
+          finalUrl: url,
+          redirectChain: null,
           region: PROBE_REGION
         });
       });
@@ -292,6 +355,9 @@ async function performHttpCheck(config) {
           detectionMetadata: null,
           dnsResponseTimeMs,
           dnsResolvedIps,
+          redirectCount: 0,
+          finalUrl: url,
+          redirectChain: null,
           region: PROBE_REGION
         });
       });
@@ -316,6 +382,9 @@ async function performHttpCheck(config) {
           detectionMetadata: null,
           dnsResponseTimeMs,
           dnsResolvedIps,
+          redirectCount: 0,
+          finalUrl: url,
+          redirectChain: null,
           region: PROBE_REGION
         });
       }
@@ -332,6 +401,9 @@ async function performHttpCheck(config) {
         detectionMetadata: null,
         dnsResponseTimeMs,
         dnsResolvedIps,
+        redirectCount: 0,
+        finalUrl: url,
+        redirectChain: null,
         region: PROBE_REGION
       });
     }
