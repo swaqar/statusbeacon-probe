@@ -124,7 +124,16 @@ async function performHttpCheck(config) {
           ...defaultHeaders,
           ...headers  // Custom headers override defaults
         },
-        rejectUnauthorized: !config.ignoreSslErrors
+        rejectUnauthorized: !config.ignoreSslErrors,
+        // Secure SSL validation: Always validate hostname even if ignoreSslErrors is true
+        checkServerIdentity: config.ignoreSslErrors ? (hostname, cert) => {
+          const tls = require('tls');
+          const hostnameCheck = tls.checkServerIdentity(hostname, cert);
+          if (hostnameCheck) {
+            return hostnameCheck; // Reject hostname mismatch
+          }
+          return undefined; // Allow self-signed/expired certs
+        } : undefined
       };
 
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
