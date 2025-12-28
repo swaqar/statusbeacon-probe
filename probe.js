@@ -232,14 +232,6 @@ async function performHttpCheck(config) {
             if (REDIRECT_STATUS_CODES.includes(statusCode) && responseHeaders.location) {
               console.log(`[Redirect] Detected ${statusCode} redirect to ${responseHeaders.location}`);
 
-              // Build initial hop
-              const initialHop = {
-                url: url,
-                statusCode: statusCode,
-                location: responseHeaders.location,
-                responseTimeMs: httpResponseTime
-              };
-
               // Follow the redirect chain
               try {
                 const redirectResult = await followRedirects(url, {
@@ -252,6 +244,32 @@ async function performHttpCheck(config) {
                 redirectCount = redirectResult.redirectCount;
                 finalUrl = redirectResult.finalUrl;
                 redirectChain = redirectResult.redirectChain;
+
+                // Use FINAL destination's status code instead of redirect code
+                if (redirectResult.finalResponse) {
+                  statusCode = redirectResult.finalStatusCode;
+
+                  // Re-evaluate status based on final destination
+                  const finalIsUp = statusCode === expectedStatus ||
+                                   (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
+
+                  if (finalIsUp) {
+                    status = 'up';
+                    errorMsg = null;
+                  } else {
+                    status = 'down';
+                    errorMsg = `Final destination returned ${statusCode} (expected ${expectedStatus})`;
+                  }
+
+                  // Check degraded threshold with total redirect time
+                  const totalRedirectTime = httpResponseTime + redirectResult.totalRedirectTime;
+                  if (status === 'up' && degradedThresholdMs && totalRedirectTime > degradedThresholdMs) {
+                    status = 'degraded';
+                    errorMsg = `Response time ${totalRedirectTime}ms exceeded threshold ${degradedThresholdMs}ms (including ${redirectCount} redirects)`;
+                  }
+
+                  console.log(`[Redirect] Final status: ${statusCode} (${status}) after ${redirectCount} redirect(s)`);
+                }
 
                 // Check for geo-based redirects
                 const geoRedirect = detectGeoRedirect(redirectChain);
