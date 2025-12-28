@@ -175,7 +175,7 @@ async function performHttpCheck(config) {
           try {
             const httpResponseTime = Date.now() - httpStartTime;
             const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-            const statusCode = res.statusCode;
+            let statusCode = res.statusCode; // Changed to let - will be updated if redirect is followed
             const isUp = statusCode === expectedStatus ||
                          (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
 
