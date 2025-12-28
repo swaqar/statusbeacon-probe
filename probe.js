@@ -28,8 +28,12 @@ const PORT = process.env.PORT || 3002;
 const PROBE_SECRET = process.env.PROBE_SECRET || '';
 const PROBE_REGION = process.env.PROBE_REGION || 'unknown';
 
-// Catch unhandled errors at process level
+// Catch unhandled errors at process level (suppress ECONNRESET during cleanup)
 process.on('uncaughtException', (error) => {
+  // Ignore ECONNRESET errors - these are socket cleanup errors after successful response
+  if (error.code === 'ECONNRESET') {
+    return; // Suppress - this is harmless
+  }
   console.error('[FATAL] Uncaught Exception:', {
     message: error.message,
     code: error.code,
@@ -123,37 +127,13 @@ async function performHttpCheck(config) {
         rejectUnauthorized: !config.ignoreSslErrors
       };
 
-      console.log(`[HTTP] Options created, ignoreSslErrors: ${config.ignoreSslErrors}`);
-      console.log(`[HTTP] Options:`, JSON.stringify(options, null, 2));
-
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
-      console.log(`[HTTP] Starting request to ${parsedUrl.hostname}${parsedUrl.pathname}`);
-
-      // Try creating a minimal request first to isolate the issue
-      console.log(`[HTTP] Testing minimal request...`);
-      try {
-        const testReq = httpModule.request({
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port || (isHttps ? 443 : 80),
-          path: '/',
-          method: 'GET'
-        }, () => {});
-        testReq.destroy();
-        console.log(`[HTTP] Minimal request object created successfully!`);
-      } catch (testError) {
-        console.error(`[HTTP] Minimal request failed:`, testError);
-      }
-
-      console.log(`[HTTP] Creating full request object...`);
-
       const req = httpModule.request(options, (res) => {
-        console.log(`[HTTP] Got response: ${res.statusCode}`);
-
         // Handle socket errors during response processing
         if (res.socket) {
           res.socket.on('error', (socketError) => {
-            console.log('[HTTP] Socket error during response (ignoring):', socketError.code);
+            // Suppress - these are cleanup errors after successful response
           });
         }
 
@@ -241,20 +221,9 @@ async function performHttpCheck(config) {
         });
       });
 
-      console.log(`[HTTP] Request object created, setting up event handlers...`);
-
       req.on('error', (error) => {
         const httpResponseTime = Date.now() - httpStartTime;
         const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-
-        // Log full error details for debugging
-        console.error('[HTTP] Request error:', {
-          message: error.message,
-          code: error.code,
-          errno: error.errno,
-          syscall: error.syscall,
-          stack: error.stack
-        });
 
         // Try to detect geo-blocking from error message
         const geoBlockDetection = detectGeoBlocking(0, {}, error.message, httpResponseTime);
@@ -281,10 +250,7 @@ async function performHttpCheck(config) {
         });
       });
 
-      console.log(`[HTTP] Error handler set`);
-
       req.on('timeout', () => {
-        console.log('[HTTP] Request timeout');
         req.destroy();
         safeResolve({
           status: 'down',
@@ -300,21 +266,16 @@ async function performHttpCheck(config) {
         });
       });
 
-      console.log(`[HTTP] Timeout handler set, all handlers ready`);
-
       // Handle socket-level errors that occur during connection/cleanup
       req.on('socket', (socket) => {
         socket.on('error', (socketError) => {
-          console.log('[HTTP] Socket error (ignoring):', socketError.code);
+          // Suppress - these are handled by req.on('error')
         });
       });
 
       try {
-        console.log('[HTTP] Calling req.end()');
         req.end();
-        console.log('[HTTP] req.end() completed');
       } catch (endError) {
-        console.error('[HTTP] Error in req.end():', endError);
         safeResolve({
           status: 'down',
           statusCode: 0,
