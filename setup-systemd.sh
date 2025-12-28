@@ -80,6 +80,7 @@ if [ -d "$INSTALL_DIR" ]; then
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/userAgents.js -o userAgents.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/geoBlockDetection.js -o geoBlockDetection.js
         curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/dnsMonitoring.js -o dnsMonitoring.js
+        curl -sSL https://raw.githubusercontent.com/swaqar/statusbeacon-probe/main/cookieJar.js -o cookieJar.js
     fi
 else
     # Fresh install - clone from git
@@ -108,7 +109,8 @@ if [ ! -f "package.json" ]; then
     "start": "node probe.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "tough-cookie": "^4.1.3"
   }
 }
 EOF
