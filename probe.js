@@ -94,7 +94,16 @@ async function performHttpCheck(config) {
 
   console.log(`[DNS] Resolved ${hostname} to ${dnsResult.ips.join(', ')} in ${dnsResult.responseTimeMs}ms${dnsResult.cached ? ' (cached)' : ''}`);
 
-  // Step 2: Perform HTTP check
+  // Step 2: Get cookies if enabled (before HTTP check)
+  let cookieHeaderValue = null;
+  if (enableCookies && monitorId) {
+    cookieHeaderValue = await getCookieHeader(monitorId, url);
+    if (cookieHeaderValue) {
+      console.log(`[CookieJar] Sending ${cookieHeaderValue.split(';').length} cookie(s) for monitor ${monitorId}`);
+    }
+  }
+
+  // Step 3: Perform HTTP check
   const httpStartTime = Date.now();
 
   return new Promise((resolve) => {
@@ -121,13 +130,9 @@ async function performHttpCheck(config) {
         ...headers  // Custom headers override defaults
       };
 
-      // Add cookies if enabled
-      if (enableCookies && monitorId) {
-        const cookieHeader = await getCookieHeader(monitorId, url);
-        if (cookieHeader) {
-          requestHeaders['Cookie'] = cookieHeader;
-          console.log(`[CookieJar] Sending ${cookieHeader.split(';').length} cookie(s) for monitor ${monitorId}`);
-        }
+      // Add cookies if we have them
+      if (cookieHeaderValue) {
+        requestHeaders['Cookie'] = cookieHeaderValue;
       }
 
       const options = {
