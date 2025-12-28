@@ -149,6 +149,14 @@ async function performHttpCheck(config) {
 
       const req = httpModule.request(options, (res) => {
         console.log(`[HTTP] Got response: ${res.statusCode}`);
+
+        // Handle socket errors during response processing
+        if (res.socket) {
+          res.socket.on('error', (socketError) => {
+            console.log('[HTTP] Socket error during response (ignoring):', socketError.code);
+          });
+        }
+
         let body = '';
         res.on('data', chunk => {
           try {
@@ -293,6 +301,13 @@ async function performHttpCheck(config) {
       });
 
       console.log(`[HTTP] Timeout handler set, all handlers ready`);
+
+      // Handle socket-level errors that occur during connection/cleanup
+      req.on('socket', (socket) => {
+        socket.on('error', (socketError) => {
+          console.log('[HTTP] Socket error (ignoring):', socketError.code);
+        });
+      });
 
       try {
         console.log('[HTTP] Calling req.end()');
