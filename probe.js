@@ -155,7 +155,19 @@ async function performHttpCheck(config) {
 
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
+      // Timing breakdown tracking
+      let socketAssignedTime = null;
+      let tcpConnectedTime = null;
+      let tlsConnectedTime = null;
+      let firstByteTime = null;
+      let downloadStartTime = null;
+
       const req = httpModule.request(options, (res) => {
+        // Mark first byte received (TTFB)
+        if (!firstByteTime) {
+          firstByteTime = Date.now();
+        }
+
         // Handle socket errors during response processing
         if (res.socket) {
           res.socket.on('error', (socketError) => {
@@ -164,8 +176,14 @@ async function performHttpCheck(config) {
         }
 
         let body = '';
+        let firstChunk = true;
         res.on('data', chunk => {
           try {
+            // Track download start time on first chunk
+            if (firstChunk) {
+              downloadStartTime = Date.now();
+              firstChunk = false;
+            }
             body += chunk.toString().slice(0, 10000); // Limit body to 10KB
           } catch (e) {
             console.error('[HTTP] Error processing response chunk:', e.message);
@@ -288,6 +306,17 @@ async function performHttpCheck(config) {
               }
             }
 
+            // Build timing breakdown
+            const endTime = Date.now();
+            const timingBreakdown = {
+              dnsMs: dnsResponseTimeMs,
+              tcpMs: tcpConnectedTime && socketAssignedTime ? tcpConnectedTime - socketAssignedTime : null,
+              tlsMs: isHttps && tlsConnectedTime && tcpConnectedTime ? tlsConnectedTime - tcpConnectedTime : null,
+              ttfbMs: firstByteTime ? firstByteTime - httpStartTime : null,
+              downloadMs: downloadStartTime ? endTime - downloadStartTime : null,
+              totalMs: httpResponseTime
+            };
+
             console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
 
             safeResolve({
@@ -306,6 +335,8 @@ async function performHttpCheck(config) {
               redirectCount,
               finalUrl,
               redirectChain,
+              // Timing breakdown
+              timingBreakdown,
               region: PROBE_REGION
             });
           } catch (endError) {
@@ -381,7 +412,30 @@ async function performHttpCheck(config) {
       });
 
       // Handle socket-level errors that occur during connection/cleanup
+      // Also track TCP and TLS connection timing
       req.on('socket', (socket) => {
+        socketAssignedTime = Date.now();
+
+        // Socket already connected (reused from pool)
+        if (socket.connecting === false) {
+          tcpConnectedTime = socketAssignedTime;
+          if (isHttps && socket.encrypted) {
+            tlsConnectedTime = socketAssignedTime;
+          }
+        } else {
+          // Track TCP connection
+          socket.once('connect', () => {
+            tcpConnectedTime = Date.now();
+          });
+
+          // Track TLS handshake (HTTPS only)
+          if (isHttps) {
+            socket.once('secureConnect', () => {
+              tlsConnectedTime = Date.now();
+            });
+          }
+        }
+
         socket.on('error', (socketError) => {
           // Suppress - these are handled by req.on('error')
         });
