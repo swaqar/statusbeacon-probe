@@ -28,6 +28,22 @@ const PORT = process.env.PORT || 3002;
 const PROBE_SECRET = process.env.PROBE_SECRET || '';
 const PROBE_REGION = process.env.PROBE_REGION || 'unknown';
 
+// Catch unhandled errors at process level
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught Exception:', {
+    message: error.message,
+    code: error.code,
+    stack: error.stack
+  });
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Rejection:', {
+    reason: reason,
+    promise: promise
+  });
+});
+
 // Perform HTTP check
 async function performHttpCheck(config) {
   const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs } = config;
@@ -250,6 +266,7 @@ async function performHttpCheck(config) {
       });
 
       req.on('timeout', () => {
+        console.log('[HTTP] Request timeout');
         req.destroy();
         safeResolve({
           status: 'down',
@@ -265,7 +282,25 @@ async function performHttpCheck(config) {
         });
       });
 
-      req.end();
+      try {
+        console.log('[HTTP] Calling req.end()');
+        req.end();
+        console.log('[HTTP] req.end() completed');
+      } catch (endError) {
+        console.error('[HTTP] Error in req.end():', endError);
+        safeResolve({
+          status: 'down',
+          statusCode: 0,
+          responseTimeMs: Date.now() - httpStartTime + dnsResponseTimeMs,
+          error: `req.end() error: ${endError.message}`,
+          isGeoBlocked: false,
+          geoBlockingIndicators: [],
+          detectionMetadata: null,
+          dnsResponseTimeMs,
+          dnsResolvedIps,
+          region: PROBE_REGION
+        });
+      }
     } catch (error) {
       const httpResponseTime = Date.now() - httpStartTime;
       const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
