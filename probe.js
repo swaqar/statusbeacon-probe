@@ -140,6 +140,7 @@ async function performHttpCheck(config) {
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
       console.log(`[HTTP] Starting request to ${parsedUrl.hostname}${parsedUrl.pathname}`);
+      console.log(`[HTTP] Creating request object...`);
 
       const req = httpModule.request(options, (res) => {
         console.log(`[HTTP] Got response: ${res.statusCode}`);
@@ -227,6 +228,8 @@ async function performHttpCheck(config) {
         });
       });
 
+      console.log(`[HTTP] Request object created, setting up event handlers...`);
+
       req.on('error', (error) => {
         const httpResponseTime = Date.now() - httpStartTime;
         const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
@@ -265,6 +268,8 @@ async function performHttpCheck(config) {
         });
       });
 
+      console.log(`[HTTP] Error handler set`);
+
       req.on('timeout', () => {
         console.log('[HTTP] Request timeout');
         req.destroy();
@@ -281,6 +286,8 @@ async function performHttpCheck(config) {
           region: PROBE_REGION
         });
       });
+
+      console.log(`[HTTP] Timeout handler set, all handlers ready`);
 
       try {
         console.log('[HTTP] Calling req.end()');
