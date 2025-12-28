@@ -20,6 +20,7 @@ const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
 const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection');
 const { resolveDns, extractHostname } = require('./dnsMonitoring');
+const { getCookieHeader, storeCookies } = require('./cookieJar');
 
 const app = express();
 app.use(express.json());
@@ -50,7 +51,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Perform HTTP check
 async function performHttpCheck(config) {
-  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs } = config;
+  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds } = config;
 
   // Step 1: Perform DNS resolution first
   const hostname = extractHostname(url);
@@ -114,16 +115,28 @@ async function performHttpCheck(config) {
       // Get realistic browser headers
       const defaultHeaders = getHeadersObject('rotate');
 
+      // Prepare request headers
+      const requestHeaders = {
+        ...defaultHeaders,
+        ...headers  // Custom headers override defaults
+      };
+
+      // Add cookies if enabled
+      if (enableCookies && monitorId) {
+        const cookieHeader = await getCookieHeader(monitorId, url);
+        if (cookieHeader) {
+          requestHeaders['Cookie'] = cookieHeader;
+          console.log(`[CookieJar] Sending ${cookieHeader.split(';').length} cookie(s) for monitor ${monitorId}`);
+        }
+      }
+
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (isHttps ? 443 : 80),
         path: parsedUrl.pathname + parsedUrl.search,
         method: method,
         timeout: timeout,
-        headers: {
-          ...defaultHeaders,
-          ...headers  // Custom headers override defaults
-        },
+        headers: requestHeaders,
         rejectUnauthorized: !config.ignoreSslErrors
         // Note: checkServerIdentity removed - causes ECONNRESET errors with some servers
       };
@@ -156,6 +169,17 @@ async function performHttpCheck(config) {
 
             // Extract response headers
             const responseHeaders = res.headers || {};
+
+            // Store cookies if enabled
+            if (enableCookies && monitorId && responseHeaders['set-cookie']) {
+              const setCookieHeaders = responseHeaders['set-cookie'];
+              const ttl = cookieTtlSeconds ? cookieTtlSeconds * 1000 : undefined;
+              storeCookies(monitorId, url, setCookieHeaders, ttl).then(() => {
+                console.log(`[CookieJar] Stored ${Array.isArray(setCookieHeaders) ? setCookieHeaders.length : 1} cookie(s) for monitor ${monitorId}`);
+              }).catch((error) => {
+                console.error(`[CookieJar] Failed to store cookies for monitor ${monitorId}:`, error.message);
+              });
+            }
 
             // Enhanced geo-blocking detection
             const geoBlockDetection = detectGeoBlocking(
@@ -401,14 +425,14 @@ app.get('/health', (req, res) => {
 // Check endpoint (auth required)
 app.post('/check', authMiddleware, async (req, res) => {
   try {
-    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port } = req.body;
+    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port, monitorId, enableCookies, cookieTtlSeconds } = req.body;
 
     let result;
 
     if (monitorType === 'tcp' || (!url && host && port)) {
       result = await performTcpCheck({ host, port, timeout, degradedThresholdMs });
     } else if (url) {
-      result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs });
+      result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds });
     } else {
       return res.status(400).json({ error: 'Missing url or host/port' });
     }
