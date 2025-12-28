@@ -18,6 +18,7 @@ const https = require('https');
 const net = require('net');
 const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
+const { detectRateLimit } = require('./rateLimitDetection');
 const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection');
 const { resolveDns, extractHostname } = require('./dnsMonitoring');
 const { getCookieHeader, storeCookies } = require('./cookieJar');
@@ -317,6 +318,17 @@ async function performHttpCheck(config) {
               totalMs: httpResponseTime
             };
 
+            // Rate limit detection
+            const rateLimitDetection = detectRateLimit(statusCode, responseHeaders, body);
+            if (rateLimitDetection.detected) {
+              console.log(`[RateLimit] Detected: ${rateLimitDetection.type}, Retry-After: ${rateLimitDetection.retryAfter}s`);
+              if (detectionMetadata) {
+                detectionMetadata.rateLimit = rateLimitDetection;
+              } else {
+                detectionMetadata = { rateLimit: rateLimitDetection, detectedAt: new Date().toISOString() };
+              }
+            }
+
             console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
 
             safeResolve({
@@ -337,6 +349,8 @@ async function performHttpCheck(config) {
               redirectChain,
               // Timing breakdown
               timingBreakdown,
+              // Rate limit detection
+              rateLimitInfo: rateLimitDetection.detected ? rateLimitDetection : null,
               region: PROBE_REGION
             });
           } catch (endError) {
