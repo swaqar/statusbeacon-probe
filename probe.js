@@ -123,7 +123,10 @@ async function performHttpCheck(config) {
 
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
+      console.log(`[HTTP] Starting request to ${parsedUrl.hostname}${parsedUrl.pathname}`);
+
       const req = httpModule.request(options, (res) => {
+        console.log(`[HTTP] Got response: ${res.statusCode}`);
         let body = '';
         res.on('data', chunk => {
           try {
@@ -211,6 +214,15 @@ async function performHttpCheck(config) {
       req.on('error', (error) => {
         const httpResponseTime = Date.now() - httpStartTime;
         const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
+
+        // Log full error details for debugging
+        console.error('[HTTP] Request error:', {
+          message: error.message,
+          code: error.code,
+          errno: error.errno,
+          syscall: error.syscall,
+          stack: error.stack
+        });
 
         // Try to detect geo-blocking from error message
         const geoBlockDetection = detectGeoBlocking(0, {}, error.message, httpResponseTime);
