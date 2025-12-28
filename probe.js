@@ -125,11 +125,28 @@ async function performHttpCheck(config) {
       };
 
       console.log(`[HTTP] Options created, ignoreSslErrors: ${config.ignoreSslErrors}`);
+      console.log(`[HTTP] Options:`, JSON.stringify(options, null, 2));
 
       // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
 
       console.log(`[HTTP] Starting request to ${parsedUrl.hostname}${parsedUrl.pathname}`);
-      console.log(`[HTTP] Creating request object...`);
+
+      // Try creating a minimal request first to isolate the issue
+      console.log(`[HTTP] Testing minimal request...`);
+      try {
+        const testReq = httpModule.request({
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (isHttps ? 443 : 80),
+          path: '/',
+          method: 'GET'
+        }, () => {});
+        testReq.destroy();
+        console.log(`[HTTP] Minimal request object created successfully!`);
+      } catch (testError) {
+        console.error(`[HTTP] Minimal request failed:`, testError);
+      }
+
+      console.log(`[HTTP] Creating full request object...`);
 
       const req = httpModule.request(options, (res) => {
         console.log(`[HTTP] Got response: ${res.statusCode}`);
