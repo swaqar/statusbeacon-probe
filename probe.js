@@ -16,6 +16,7 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const crypto = require('crypto'); // Phase 2.2: Content validation
 const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
 const { detectRateLimit } = require('./rateLimitDetection');
@@ -177,7 +178,11 @@ async function performHttpCheck(config) {
         }
 
         let body = '';
+        let fullBody = ''; // Phase 2.2: Capture full body for content validation
+        let totalSize = 0; // Phase 2.2: Track actual response size
+        const MAX_BODY_SIZE = 100 * 1024; // 100KB limit for content validation
         let firstChunk = true;
+
         res.on('data', chunk => {
           try {
             // Track download start time on first chunk
@@ -185,7 +190,18 @@ async function performHttpCheck(config) {
               downloadStartTime = Date.now();
               firstChunk = false;
             }
-            body += chunk.toString().slice(0, 10000); // Limit body to 10KB
+
+            totalSize += chunk.length; // Phase 2.2: Track total size
+
+            // Keep first 10KB for geo-blocking detection (legacy behavior)
+            if (body.length < 10000) {
+              body += chunk.toString().slice(0, 10000 - body.length);
+            }
+
+            // Phase 2.2: Keep first 100KB for content validation
+            if (fullBody.length < MAX_BODY_SIZE) {
+              fullBody += chunk.toString().slice(0, MAX_BODY_SIZE - fullBody.length);
+            }
           } catch (e) {
             console.error('[HTTP] Error processing response chunk:', e.message);
           }
@@ -331,6 +347,10 @@ async function performHttpCheck(config) {
 
             console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
 
+            // Phase 2.2: Generate content hash for validation
+            const contentHash = crypto.createHash('sha256').update(fullBody).digest('hex');
+            const responseSize = totalSize;
+
             safeResolve({
               status,
               statusCode,
@@ -351,6 +371,10 @@ async function performHttpCheck(config) {
               timingBreakdown,
               // Rate limit detection
               rateLimitInfo: rateLimitDetection.detected ? rateLimitDetection : null,
+              // Phase 2.2: Content validation fields
+              contentHash,
+              responseSize,
+              responseBody: fullBody, // Send body for server-side validation
               region: PROBE_REGION
             });
           } catch (endError) {
