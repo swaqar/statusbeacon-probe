@@ -288,18 +288,8 @@ function detectGeneralGeoBlocking(statusCode, headers, body, responseTime) {
     };
   }
 
-  // Fast 403 responses are often geo-blocks (< 100ms)
-  if (statusCode === 403 && responseTime && responseTime < 100) {
-    return {
-      detected: true,
-      reason: 'Fast 403 response suggests automated geo-blocking',
-      type: 'geo_blocking',
-      metadata: {
-        statusCode,
-        responseTime,
-      },
-    };
-  }
+  // REMOVED: Fast 403 heuristic - too many false positives from bot detection, WAF, auth failures
+  // Only flag as geo-blocking if there's explicit evidence (keywords/headers above)
 
   return { detected: false };
 }

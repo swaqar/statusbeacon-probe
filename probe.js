@@ -357,7 +357,8 @@ async function performHttpCheck(config) {
               responseTimeMs: totalResponseTime,
               error: errorMsg,
               // Legacy fields for backward compatibility
-              isGeoBlocked: geoBlockDetection.detected || false,
+              // Only set isGeoBlocked to true for actual geo-blocking, not Cloudflare/WAF/rate-limit blocks
+              isGeoBlocked: geoBlockDetection.detected && geoBlockDetection.type === 'geo_blocking',
               geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
               // New enhanced detection
               detectionMetadata,
@@ -418,7 +419,8 @@ async function performHttpCheck(config) {
           statusCode: 0,
           responseTimeMs: totalResponseTime,
           error: error.message,
-          isGeoBlocked: geoBlockDetection.detected || false,
+          // Only set isGeoBlocked to true for actual geo-blocking, not Cloudflare/WAF/rate-limit blocks
+          isGeoBlocked: geoBlockDetection.detected && geoBlockDetection.type === 'geo_blocking',
           geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
           detectionMetadata,
           dnsResponseTimeMs,
