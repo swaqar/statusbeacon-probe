@@ -614,12 +614,31 @@ app.get('/health', (req, res) => {
 // Check endpoint (auth required)
 app.post('/check', authMiddleware, async (req, res) => {
   try {
-    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port, monitorId, enableCookies, cookieTtlSeconds } = req.body;
+    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port, monitorId, enableCookies, cookieTtlSeconds, pingPort } = req.body;
 
     let result;
 
-    if (monitorType === 'tcp' || (!url && host && port)) {
-      result = await performTcpCheck({ host, port, timeout, degradedThresholdMs });
+    // Handle TCP checks - support both 'tcp' and 'tcp_ping' monitor types
+    if (monitorType === 'tcp' || monitorType === 'tcp_ping' || (!url && host && port)) {
+      // Extract host from URL if not provided directly
+      let tcpHost = host;
+      let tcpPort = port || pingPort || 80;
+
+      if (!tcpHost && url) {
+        // Extract host from URL (e.g., tcp://8.8.8.8:53 -> host: 8.8.8.8, port: 53)
+        let extractedUrl = url;
+        if (extractedUrl.includes('://')) {
+          extractedUrl = extractedUrl.split('://')[1];
+        }
+        extractedUrl = extractedUrl.split('/')[0]; // Remove path if present
+        const hostPort = extractedUrl.split(':');
+        tcpHost = hostPort[0];
+        if (hostPort.length > 1 && !tcpPort) {
+          tcpPort = parseInt(hostPort[1]);
+        }
+      }
+
+      result = await performTcpCheck({ host: tcpHost, port: tcpPort, timeout, degradedThresholdMs });
     } else if (url) {
       result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds });
     } else {
