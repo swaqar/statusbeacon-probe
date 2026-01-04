@@ -145,6 +145,18 @@ async function resolveDnsWithTimeout(hostname, timeout, ipVersion = 4) {
 }
 
 /**
+ * Check if a string is an IP address (IPv4 or IPv6)
+ */
+function isIpAddress(hostname) {
+  // IPv4 pattern: xxx.xxx.xxx.xxx
+  const ipv4Pattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+  // IPv6 pattern: simplified check for colons
+  const ipv6Pattern = /^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$/i;
+
+  return ipv4Pattern.test(hostname) || ipv6Pattern.test(hostname);
+}
+
+/**
  * Resolve DNS with monitoring
  *
  * @param {string} hostname - Hostname to resolve
@@ -154,6 +166,18 @@ async function resolveDnsWithTimeout(hostname, timeout, ipVersion = 4) {
  */
 async function resolveDns(hostname, timeout = 5000, useCache = true) {
   const startTime = Date.now();
+
+  // IMPORTANT: If hostname is already an IP address, skip DNS resolution
+  if (isIpAddress(hostname)) {
+    return {
+      success: true,
+      ips: [hostname],
+      responseTimeMs: 0,
+      cached: false,
+      hijacked: false,
+      hijackReason: null,
+    };
+  }
 
   // Check cache first
   if (useCache) {
