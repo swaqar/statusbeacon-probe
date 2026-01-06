@@ -1,9 +1,9 @@
 /**
  * StatusBeacon Probe Service
- * 
+ *
  * Lightweight, standalone probe that performs HTTP/TCP checks
  * for the main StatusBeacon server.
- * 
+ *
  * Setup:
  *   1. Copy this folder to your probe server
  *   2. npm install
@@ -16,7 +16,7 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const net = require('net');
-const crypto = require('crypto'); // Phase 2.2: Content validation
+const crypto = require('crypto');
 const { URL } = require('url');
 const { getHeadersObject } = require('./userAgents');
 const { detectRateLimit } = require('./rateLimitDetection');
@@ -24,569 +24,281 @@ const { detectGeoBlocking, getBlockingMessage } = require('./geoBlockDetection')
 const { resolveDns, extractHostname } = require('./dnsMonitoring');
 const { getCookieHeader, storeCookies } = require('./cookieJar');
 const { followRedirects, detectGeoRedirect, REDIRECT_STATUS_CODES } = require('./redirectTracking');
+const { validateContent } = require('./contentValidation');
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PROBE_PORT || 3002;
 const PROBE_SECRET = process.env.PROBE_SECRET || '';
 const PROBE_REGION = process.env.PROBE_REGION || 'unknown';
 
-// Catch unhandled errors at process level (suppress ECONNRESET during cleanup)
-process.on('uncaughtException', (error) => {
-  // Ignore ECONNRESET errors - these are socket cleanup errors after successful response
-  if (error.code === 'ECONNRESET') {
-    return; // Suppress - this is harmless
-  }
-  console.error('[FATAL] Uncaught Exception:', {
-    message: error.message,
-    code: error.code,
-    stack: error.stack
-  });
-});
+// Geo-blocking detection
+const GEO_BLOCKING_STATUS_CODES = [403, 451, 406];
+const GEO_BLOCKING_PATTERNS = [
+  'access denied',
+  'forbidden',
+  'geo-blocked',
+  'not available in your region',
+  'country block',
+  'region block',
+  'blocked in your country',
+  'geographical restriction',
+];
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[FATAL] Unhandled Rejection:', {
-    reason: reason,
-    promise: promise
-  });
-});
+function detectGeoBlocking(
+  statusCode: number | null,
+  errorMessage: string | null,
+  responseBody?: string
+): { isGeoBlocked: boolean; indicators: string[] } {
+  const indicators: string[] = [];
 
-// Perform HTTP check
-async function performHttpCheck(config) {
-  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds } = config;
-
-  // Step 1: Perform DNS resolution first
-  const hostname = extractHostname(url);
-  const dnsResult = await resolveDns(hostname, 5000);
-
-  const dnsResponseTimeMs = dnsResult.responseTimeMs;
-  const dnsResolvedIps = dnsResult.ips;
-
-  // Check for DNS failure
-  if (!dnsResult.success) {
-    return {
-      status: 'dns_failure',
-      statusCode: null,
-      responseTimeMs: dnsResult.responseTimeMs,
-      error: `DNS resolution failed: ${dnsResult.error}`,
-      isGeoBlocked: false,
-      geoBlockingIndicators: [],
-      detectionMetadata: null,
-      dnsResponseTimeMs: dnsResult.responseTimeMs,
-      dnsResolvedIps: [],
-      redirectCount: 0,
-      finalUrl: url,
-      redirectChain: null,
-      region: PROBE_REGION
-    };
+  if (statusCode && GEO_BLOCKING_STATUS_CODES.includes(statusCode)) {
+    indicators.push(`Status code ${statusCode} indicates potential geo-blocking`);
   }
 
-  // Check for DNS hijacking
-  if (dnsResult.hijacked) {
-    return {
-      status: 'dns_failure',
-      statusCode: null,
-      responseTimeMs: dnsResult.responseTimeMs,
-      error: `DNS hijacking detected: ${dnsResult.hijackReason}`,
-      isGeoBlocked: false,
-      geoBlockingIndicators: [],
-      detectionMetadata: null,
-      dnsResponseTimeMs: dnsResult.responseTimeMs,
-      dnsResolvedIps: dnsResult.ips,
-      redirectCount: 0,
-      finalUrl: url,
-      redirectChain: null,
-      region: PROBE_REGION
-    };
-  }
-
-  console.log(`[DNS] Resolved ${hostname} to ${dnsResult.ips.join(', ')} in ${dnsResult.responseTimeMs}ms${dnsResult.cached ? ' (cached)' : ''}`);
-
-  // Step 2: Get cookies if enabled (before HTTP check)
-  let cookieHeaderValue = null;
-  if (enableCookies && monitorId) {
-    cookieHeaderValue = await getCookieHeader(monitorId, url);
-    if (cookieHeaderValue) {
-      console.log(`[CookieJar] Sending ${cookieHeaderValue.split(';').length} cookie(s) for monitor ${monitorId}`);
+  if (errorMessage) {
+    const lowerError = errorMessage.toLowerCase();
+    for (const pattern of GEO_BLOCKING_PATTERNS) {
+      if (lowerError.includes(pattern)) {
+        indicators.push(`Error message contains "${pattern}"`);
+      }
     }
   }
 
-  // Step 3: Perform HTTP check
-  const httpStartTime = Date.now();
-
-  return new Promise((resolve) => {
-    let resolved = false;
-    const safeResolve = (result) => {
-      if (!resolved) {
-        resolved = true;
-        resolve(result);
+  if (responseBody) {
+    const lowerBody = responseBody.toLowerCase();
+    for (const pattern of GEO_BLOCKING_PATTERNS) {
+      if (lowerBody.includes(pattern)) {
+        indicators.push(`Response body contains "${pattern}"`);
       }
-    };
-
-    try {
-      // Parse URL first (can throw)
-      const parsedUrl = new URL(url);
-      const isHttps = parsedUrl.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      // Get realistic browser headers
-      const defaultHeaders = getHeadersObject('rotate');
-
-      // Prepare request headers
-      const requestHeaders = {
-        ...defaultHeaders,
-        ...headers  // Custom headers override defaults
-      };
-
-      // Add cookies if we have them
-      if (cookieHeaderValue) {
-        requestHeaders['Cookie'] = cookieHeaderValue;
-      }
-
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (isHttps ? 443 : 80),
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: method,
-        timeout: timeout,
-        headers: requestHeaders,
-        rejectUnauthorized: !config.ignoreSslErrors
-        // Note: checkServerIdentity removed - causes ECONNRESET errors with some servers
-      };
-
-      // Note: HTTP/2 is disabled via NODE_NO_HTTP2=1 environment variable set in systemd service
-
-      // Timing breakdown tracking
-      let socketAssignedTime = null;
-      let tcpConnectedTime = null;
-      let tlsConnectedTime = null;
-      let firstByteTime = null;
-      let downloadStartTime = null;
-
-      const req = httpModule.request(options, (res) => {
-        // Mark first byte received (TTFB)
-        if (!firstByteTime) {
-          firstByteTime = Date.now();
-        }
-
-        // Handle socket errors during response processing
-        if (res.socket) {
-          res.socket.on('error', (socketError) => {
-            // Suppress - these are cleanup errors after successful response
-          });
-        }
-
-        let body = '';
-        let fullBody = ''; // Phase 2.2: Capture full body for content validation
-        let totalSize = 0; // Phase 2.2: Track actual response size
-        const MAX_BODY_SIZE = 100 * 1024; // 100KB limit for content validation
-        let firstChunk = true;
-
-        res.on('data', chunk => {
-          try {
-            // Track download start time on first chunk
-            if (firstChunk) {
-              downloadStartTime = Date.now();
-              firstChunk = false;
-            }
-
-            totalSize += chunk.length; // Phase 2.2: Track total size
-
-            // Keep first 10KB for geo-blocking detection (legacy behavior)
-            if (body.length < 10000) {
-              body += chunk.toString().slice(0, 10000 - body.length);
-            }
-
-            // Phase 2.2: Keep first 100KB for content validation
-            if (fullBody.length < MAX_BODY_SIZE) {
-              fullBody += chunk.toString().slice(0, MAX_BODY_SIZE - fullBody.length);
-            }
-          } catch (e) {
-            console.error('[HTTP] Error processing response chunk:', e.message);
-          }
-        });
-        res.on('end', async () => {
-          try {
-            const httpResponseTime = Date.now() - httpStartTime;
-            const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-            let statusCode = res.statusCode; // Changed to let - will be updated if redirect is followed
-            const isUp = statusCode === expectedStatus ||
-                         (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
-
-            // Extract response headers
-            const responseHeaders = res.headers || {};
-
-            // Store cookies if enabled
-            if (enableCookies && monitorId && responseHeaders['set-cookie']) {
-              const setCookieHeaders = responseHeaders['set-cookie'];
-              const ttl = cookieTtlSeconds ? cookieTtlSeconds * 1000 : undefined;
-              storeCookies(monitorId, url, setCookieHeaders, ttl).then(() => {
-                console.log(`[CookieJar] Stored ${Array.isArray(setCookieHeaders) ? setCookieHeaders.length : 1} cookie(s) for monitor ${monitorId}`);
-              }).catch((error) => {
-                console.error(`[CookieJar] Failed to store cookies for monitor ${monitorId}:`, error.message);
-              });
-            }
-
-            // Enhanced geo-blocking detection
-            const geoBlockDetection = detectGeoBlocking(
-              statusCode,
-              responseHeaders,
-              body,
-              httpResponseTime
-            );
-
-            // Check if response time exceeds degraded threshold (only if status is currently 'up')
-            let status = isUp ? 'up' : 'down';
-            let errorMsg = isUp ? null : `Expected ${expectedStatus}, got ${statusCode}`;
-
-            // If geo-blocking detected, update error message
-            if (geoBlockDetection.detected) {
-              errorMsg = getBlockingMessage(geoBlockDetection);
-            }
-
-            if (status === 'up' && degradedThresholdMs && totalResponseTime > degradedThresholdMs) {
-              status = 'degraded';
-              errorMsg = `Response time ${totalResponseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
-            }
-
-            // Build detection metadata
-            let detectionMetadata = null;
-            if (geoBlockDetection.detected) {
-              detectionMetadata = {
-                geoBlocking: geoBlockDetection,
-                detectedAt: new Date().toISOString(),
-              };
-            }
-
-            // Redirect tracking: Check if this is a redirect response
-            let redirectCount = 0;
-            let finalUrl = url;
-            let redirectChain = null;
-
-            if (REDIRECT_STATUS_CODES.includes(statusCode) && responseHeaders.location) {
-              console.log(`[Redirect] Detected ${statusCode} redirect to ${responseHeaders.location}`);
-
-              // Follow the redirect chain
-              try {
-                const redirectResult = await followRedirects(url, {
-                  method,
-                  headers: requestHeaders,
-                  timeout,
-                  rejectUnauthorized: !config.ignoreSslErrors
-                });
-
-                redirectCount = redirectResult.redirectCount;
-                finalUrl = redirectResult.finalUrl;
-                redirectChain = redirectResult.redirectChain;
-
-                // Use FINAL destination's status code instead of redirect code
-                if (redirectResult.finalResponse) {
-                  statusCode = redirectResult.finalStatusCode;
-
-                  // Re-evaluate status based on final destination
-                  const finalIsUp = statusCode === expectedStatus ||
-                                   (expectedStatus === 200 && statusCode >= 200 && statusCode < 300);
-
-                  if (finalIsUp) {
-                    status = 'up';
-                    errorMsg = null;
-                  } else {
-                    status = 'down';
-                    errorMsg = `Final destination returned ${statusCode} (expected ${expectedStatus})`;
-                  }
-
-                  // Check degraded threshold with total redirect time
-                  const totalRedirectTime = httpResponseTime + redirectResult.totalRedirectTime;
-                  if (status === 'up' && degradedThresholdMs && totalRedirectTime > degradedThresholdMs) {
-                    status = 'degraded';
-                    errorMsg = `Response time ${totalRedirectTime}ms exceeded threshold ${degradedThresholdMs}ms (including ${redirectCount} redirects)`;
-                  }
-
-                  console.log(`[Redirect] Final status: ${statusCode} (${status}) after ${redirectCount} redirect(s)`);
-                }
-
-                // Check for geo-based redirects
-                const geoRedirect = detectGeoRedirect(redirectChain);
-                if (geoRedirect.detected) {
-                  console.log(`[Redirect] Geo-based redirect detected: ${geoRedirect.reason}`);
-                  if (!detectionMetadata) {
-                    detectionMetadata = {};
-                  }
-                  detectionMetadata.geoRedirect = geoRedirect;
-                }
-
-                // Log redirect chain
-                console.log(`[Redirect] Followed ${redirectCount} redirect(s), final URL: ${finalUrl}`);
-              } catch (redirectError) {
-                console.error(`[Redirect] Error following redirects: ${redirectError.message}`);
-              }
-            }
-
-            // Build timing breakdown
-            const endTime = Date.now();
-            const timingBreakdown = {
-              dnsMs: dnsResponseTimeMs,
-              tcpMs: tcpConnectedTime && socketAssignedTime ? tcpConnectedTime - socketAssignedTime : null,
-              tlsMs: isHttps && tlsConnectedTime && tcpConnectedTime ? tlsConnectedTime - tcpConnectedTime : null,
-              ttfbMs: firstByteTime ? firstByteTime - httpStartTime : null,
-              downloadMs: downloadStartTime ? endTime - downloadStartTime : null,
-              totalMs: httpResponseTime
-            };
-
-            // Rate limit detection
-            const rateLimitDetection = detectRateLimit(statusCode, responseHeaders, body);
-            if (rateLimitDetection.detected) {
-              console.log(`[RateLimit] Detected: ${rateLimitDetection.type}, Retry-After: ${rateLimitDetection.retryAfter}s`);
-              if (detectionMetadata) {
-                detectionMetadata.rateLimit = rateLimitDetection;
-              } else {
-                detectionMetadata = { rateLimit: rateLimitDetection, detectedAt: new Date().toISOString() };
-              }
-            }
-
-            console.log(`[HTTP] ${status} - ${totalResponseTime}ms (DNS: ${dnsResponseTimeMs}ms, HTTP: ${httpResponseTime}ms)`);
-
-            // Phase 2.2: Generate content hash for validation
-            const contentHash = crypto.createHash('sha256').update(fullBody).digest('hex');
-            const responseSize = totalSize;
-
-            safeResolve({
-              status,
-              statusCode,
-              responseTimeMs: totalResponseTime,
-              error: errorMsg,
-              // Legacy fields for backward compatibility
-              // Only set isGeoBlocked to true for actual geo-blocking, not Cloudflare/WAF/rate-limit blocks
-              isGeoBlocked: geoBlockDetection.detected && geoBlockDetection.type === 'geo_blocking',
-              geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
-              // New enhanced detection
-              detectionMetadata,
-              dnsResponseTimeMs,
-              dnsResolvedIps,
-              // Redirect tracking
-              redirectCount,
-              finalUrl,
-              redirectChain,
-              // Timing breakdown
-              timingBreakdown,
-              // Rate limit detection
-              rateLimitInfo: rateLimitDetection.detected ? rateLimitDetection : null,
-              // Phase 2.2: Content validation fields
-              contentHash,
-              responseSize,
-              responseBody: fullBody, // Send body for server-side validation
-              region: PROBE_REGION
-            });
-          } catch (endError) {
-            console.error('[HTTP] Error in end handler:', endError.message);
-            safeResolve({
-              status: 'down',
-              statusCode: 0,
-              responseTimeMs: Date.now() - httpStartTime + dnsResponseTimeMs,
-              error: `Response processing error: ${endError.message}`,
-              isGeoBlocked: false,
-              geoBlockingIndicators: [],
-              detectionMetadata: null,
-              dnsResponseTimeMs,
-              dnsResolvedIps,
-              redirectCount: 0,
-              finalUrl: url,
-              redirectChain: null,
-              region: PROBE_REGION
-            });
-          }
-        });
-      });
-
-      req.on('error', (error) => {
-        const httpResponseTime = Date.now() - httpStartTime;
-        const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-
-        // Try to detect geo-blocking from error message
-        const geoBlockDetection = detectGeoBlocking(0, {}, error.message, httpResponseTime);
-
-        let detectionMetadata = null;
-        if (geoBlockDetection.detected) {
-          detectionMetadata = {
-            geoBlocking: geoBlockDetection,
-            detectedAt: new Date().toISOString(),
-          };
-        }
-
-        safeResolve({
-          status: 'down',
-          statusCode: 0,
-          responseTimeMs: totalResponseTime,
-          error: error.message,
-          // Only set isGeoBlocked to true for actual geo-blocking, not Cloudflare/WAF/rate-limit blocks
-          isGeoBlocked: geoBlockDetection.detected && geoBlockDetection.type === 'geo_blocking',
-          geoBlockingIndicators: geoBlockDetection.detected ? [geoBlockDetection.reason] : [],
-          detectionMetadata,
-          dnsResponseTimeMs,
-          dnsResolvedIps,
-          redirectCount: 0,
-          finalUrl: url,
-          redirectChain: null,
-          region: PROBE_REGION
-        });
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        safeResolve({
-          status: 'down',
-          statusCode: 0,
-          responseTimeMs: timeout + dnsResponseTimeMs,
-          error: 'Request timeout',
-          isGeoBlocked: false,
-          geoBlockingIndicators: [],
-          detectionMetadata: null,
-          dnsResponseTimeMs,
-          dnsResolvedIps,
-          redirectCount: 0,
-          finalUrl: url,
-          redirectChain: null,
-          region: PROBE_REGION
-        });
-      });
-
-      // Handle socket-level errors that occur during connection/cleanup
-      // Also track TCP and TLS connection timing
-      req.on('socket', (socket) => {
-        socketAssignedTime = Date.now();
-
-        // Socket already connected (reused from pool)
-        if (socket.connecting === false) {
-          tcpConnectedTime = socketAssignedTime;
-          if (isHttps && socket.encrypted) {
-            tlsConnectedTime = socketAssignedTime;
-          }
-        } else {
-          // Track TCP connection
-          socket.once('connect', () => {
-            tcpConnectedTime = Date.now();
-          });
-
-          // Track TLS handshake (HTTPS only)
-          if (isHttps) {
-            socket.once('secureConnect', () => {
-              tlsConnectedTime = Date.now();
-            });
-          }
-        }
-
-        socket.on('error', (socketError) => {
-          // Suppress - these are handled by req.on('error')
-        });
-      });
-
-      try {
-        req.end();
-      } catch (endError) {
-        safeResolve({
-          status: 'down',
-          statusCode: 0,
-          responseTimeMs: Date.now() - httpStartTime + dnsResponseTimeMs,
-          error: `req.end() error: ${endError.message}`,
-          isGeoBlocked: false,
-          geoBlockingIndicators: [],
-          detectionMetadata: null,
-          dnsResponseTimeMs,
-          dnsResolvedIps,
-          redirectCount: 0,
-          finalUrl: url,
-          redirectChain: null,
-          region: PROBE_REGION
-        });
-      }
-    } catch (error) {
-      const httpResponseTime = Date.now() - httpStartTime;
-      const totalResponseTime = httpResponseTime + dnsResponseTimeMs;
-      safeResolve({
-        status: 'down',
-        statusCode: 0,
-        responseTimeMs: totalResponseTime,
-        error: error.message,
-        isGeoBlocked: false,
-        geoBlockingIndicators: [],
-        detectionMetadata: null,
-        dnsResponseTimeMs,
-        dnsResolvedIps,
-        redirectCount: 0,
-        finalUrl: url,
-        redirectChain: null,
-        region: PROBE_REGION
-      });
     }
-  });
+  }
+
+  return { isGeoBlocked: indicators.length > 0, indicators };
 }
 
-// Perform TCP check
-async function performTcpCheck(config) {
-  const { host, port, timeout = 10000, degradedThresholdMs } = config;
+interface ProbeRequest {
+  monitorId: string;
+  url: string;
+  method: string;
+  monitorType: string;
+  timeoutSeconds: number;
+  expectedStatus?: number;
+  headers?: Record<string, string>;
+  pingPort?: number;
+  ignoreSslErrors?: boolean;
+  degradedThresholdMs?: number;
+  enableCookies?: boolean;
+  cookieTtlSeconds?: number;
+  // Content validation configuration
+  contentValidation?: any;
+}
+
+interface ProbeResult {
+  monitorId: string;
+  region: string;
+  status: 'up' | 'down' | 'degraded';
+  statusCode: number | null;
+  responseTimeMs: number;
+  errorMessage: string | null;
+  isGeoBlocked: boolean;
+  geoBlockingIndicators: string[];
+  // Response data (limited to first 100KB for efficiency)
+  responseBody?: string;
+  contentValidated?: boolean;
+  contentHash?: string;
+  validationErrors?: string[];
+  responseSize?: number;
+  // Redirect tracking
+  redirectCount?: number;
+  finalUrl?: string;
+  redirectChain?: any;
+  // Timing breakdown
+  timingBreakdown?: any;
+  // Rate limiting info
+  rateLimitInfo?: any;
+}
+
+async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
+  const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds, contentValidation } = config;
+
   const startTime = Date.now();
+  let statusCode: number | null = null;
+  let errorMessage: string | null = null;
+  let responseBody: string | undefined;
 
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.timeoutSeconds * 1000);
 
-    socket.setTimeout(timeout);
+    // Create custom agent if SSL errors should be ignored
+    const defaultHeaders = getHeadersObject('rotate');
 
-    socket.on('connect', () => {
-      const responseTime = Date.now() - startTime;
-      socket.destroy();
+    // Prepare request headers
+    const requestHeaders = {
+      ...defaultHeaders,
+      ...headers,
+    };
 
-      // Check if response time exceeds degraded threshold
-      let status = 'up';
-      let errorMsg = null;
-      if (degradedThresholdMs && responseTime > degradedThresholdMs) {
-        status = 'degraded';
-        errorMsg = `Response time ${responseTime}ms exceeded threshold ${degradedThresholdMs}ms`;
-      }
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method,
+      timeout,
+      headers: requestHeaders,
+      rejectUnauthorized: !config.ignoreSslErrors,
+      agent: new https.Agent({ rejectUnauthorized: !config.ignoreSslErrors }),
+    };
 
-      resolve({
-        status,
-        responseTimeMs: responseTime,
-        error: errorMsg,
-        region: PROBE_REGION
-      });
-    });
-    
-    socket.on('error', (error) => {
-      const responseTime = Date.now() - startTime;
-      socket.destroy();
-      resolve({
-        status: 'down',
-        responseTimeMs: responseTime,
-        error: error.message,
-        region: PROBE_REGION
-      });
-    });
-    
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve({
-        status: 'down',
-        responseTimeMs: timeout,
-        error: 'Connection timeout',
-        region: PROBE_REGION
-      });
-    });
-    
+    const response = await fetch(url, options);
+
+    clearTimeout(timeoutId);
+    statusCode = response.status;
+
     try {
-      socket.connect(port, host);
-    } catch (error) {
-      resolve({
-        status: 'down',
-        responseTimeMs: Date.now() - startTime,
-        error: error.message,
-        region: PROBE_REGION
-      });
+      responseBody = await response.text();
+    } catch {
+      responseBody = undefined;
     }
-  });
+
+    if (config.expectedStatus && statusCode !== config.expectedStatus) {
+      status = 'down';
+      errorMessage = `Expected status ${config.expectedStatus}, got ${statusCode}`;
+    }
+  } catch (error) {
+    status = 'down';
+    errorMessage = error.name === 'AbortError' ? 'Request timeout' : error.message;
+  }
+
+  const responseTimeMs = Date.now() - startTime;
+
+  if (config.expectedStatus && statusCode !== config.expectedStatus) {
+    status = 'down';
+    errorMessage = `Expected status ${config.expectedStatus}, got ${statusCode}`;
+  }
+
+  if (status === 'up' && config.degradedThresholdMs && responseTimeMs > config.degradedThresholdMs) {
+    status = 'degraded';
+    errorMessage = `Response time ${responseTimeMs}ms exceeded threshold ${config.degradedThresholdMs}ms`;
+  }
+
+  const geoBlockCheck = detectGeoBlocking(statusCode, errorMessage, responseBody);
+
+  console.log(`[PROBE:${PROBE_REGION}] ${config.url}: ${status} - ${responseTimeMs}ms${geoBlockCheck.isGeoBlocked ? ' [GEO-BLOCKED]' : ''}`);
+
+  // Content validation (Phase 2.2) - only for HTTP checks with response body
+  let contentValidated: boolean | undefined = undefined;
+  let contentHash: string | undefined = undefined;
+  let validationErrors: string[] | undefined = undefined;
+  const responseSize = responseBody ? Buffer.byteLength(responseBody, 'utf8') : undefined;
+
+  if (config.method !== 'tcp_ping' && config.method !== 'http_head' && responseBody) {
+    try {
+      const validationResult = await validateContent(responseBody, contentValidation);
+
+      if (validationResult) {
+        contentValidated = validationResult.passed;
+        contentHash = validationResult.contentHash || undefined;
+        validationErrors = validationResult.errors.length > 0 ? validationResult.errors : undefined;
+        responseSize = validationResult.responseSize;
+
+        if (!validationResult.passed) {
+          console.log(`[PROBE:${PROBE_REGION}] Content validation failed: ${validationErrors?.join(', ')}`);
+        }
+      }
+    } catch (error) {
+      console.error(`[PROBE:${PROBE_REGION}] Content validation error:`, (error as Error).message);
+      validationErrors = [error.message];
+    }
+  }
+
+  return {
+    monitorId: config.monitorId,
+    region: PROBE_REGION,
+    status,
+    statusCode,
+    responseTimeMs,
+    errorMessage,
+    isGeoBlocked: geoBlockCheck.isGeoBlocked,
+    geoBlockingIndicators: geoBlockCheck.indicators,
+    responseBody,
+    contentValidated,
+    contentHash,
+    validationErrors,
+    responseSize,
+  };
 }
 
-// Auth middleware
+async function performTcpCheck(config: ProbeRequest): Promise<ProbeResult> {
+  const { host, port, timeout, degradedThresholdMs } = config;
+  const startTime = Date.now();
+  let status: 'up' | 'down' | 'degraded' = 'up';
+  let errorMessage: string | null = null;
+
+  try {
+    let tcpHost = host;
+    if (host.includes('://')) {
+      tcpHost = host.split('://')[1];
+    }
+    host = host.split('/')[0].split(':')[0];
+
+    const tcpPort = port || 80;
+    const timeoutMs = timeout * 1000;
+
+    await new Promise<void>((resolve, reject) => {
+      const socket = new net.Socket();
+
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('Connection timeout'));
+      }, timeoutMs);
+
+      socket.connect(port, host, () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve();
+      });
+
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(err);
+      });
+    });
+  } catch (error: any) {
+    status = 'down';
+    errorMessage = error.message;
+  }
+
+  const responseTimeMs = Date.now() - startTime;
+
+  if (status === 'up' && degradedThresholdMs && responseTimeMs > degradedThresholdMs) {
+    status = 'degraded';
+    errorMessage = `Response time ${responseTimeMs}ms exceeded threshold ${degradedThresholdMs}ms`;
+  }
+
+  console.log(`[PROBE:${PROBE_REGION}:TCP] ${host}:${port}: ${status} - ${responseTimeMs}ms`);
+
+  return {
+    monitorId: config.monitorId,
+    region: PROBE_REGION,
+    status,
+    statusCode: null,
+    responseTimeMs,
+    errorMessage,
+    isGeoBlocked: false,
+    geoBlockingIndicators: [],
+    responseBody: undefined,
+    contentValidated: undefined,
+    contentHash: undefined,
+    validationErrors: undefined,
+    responseSize: undefined,
+  };
+}
+
+// Authentication middleware
 function authMiddleware(req, res, next) {
   if (!PROBE_SECRET) {
     console.warn('Warning: PROBE_SECRET not set, authentication disabled');
@@ -600,84 +312,51 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// Health endpoint (no auth required)
+// Health check
 app.get('/health', (req, res) => {
   res.json({
-    status: 'healthy',
+    status: 'ok',
     region: PROBE_REGION,
     version: '1.0.0',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Check endpoint (auth required)
+// Check endpoint
 app.post('/check', authMiddleware, async (req, res) => {
   try {
-    const { url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorType, host, port, monitorId, enableCookies, cookieTtlSeconds, pingPort } = req.body;
+    const config: ProbeRequest = req.body;
 
-    let result;
+    console.log(`[PROBE] Received check request for ${config.url}`);
 
-    // Handle TCP checks - support both 'tcp' and 'tcp_ping' monitor types
-    if (monitorType === 'tcp' || monitorType === 'tcp_ping' || (!url && host && port)) {
-      // Extract host from URL if not provided directly
-      let tcpHost = host;
-      let tcpPort = port || pingPort || 80;
+    let result: ProbeResult;
 
-      if (!tcpHost && url) {
-        // Extract host from URL (e.g., tcp://8.8.8.8:53 -> host: 8.8.8.8, port: 53)
-        let extractedUrl = url;
-        if (extractedUrl.includes('://')) {
-          extractedUrl = extractedUrl.split('://')[1];
-        }
-        extractedUrl = extractedUrl.split('/')[0]; // Remove path if present
-        const hostPort = extractedUrl.split(':');
-        tcpHost = hostPort[0];
-        if (hostPort.length > 1 && !tcpPort) {
-          tcpPort = parseInt(hostPort[1]);
-        }
-      }
-
-      result = await performTcpCheck({ host: tcpHost, port: tcpPort, timeout, degradedThresholdMs });
-    } else if (url) {
-      result = await performHttpCheck({ url, method, expectedStatus, timeout, headers, ignoreSslErrors, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds });
-    } else {
-      return res.status(400).json({ error: 'Missing url or host/port' });
+    switch (config.monitorType) {
+      case 'tcp_ping':
+        result = await performTcpCheck(config);
+        break;
+      case 'http_head':
+        result = await performHttpCheck({ ...config, method: 'HEAD' });
+        break;
+      case 'http':
+      default:
+        result = await performHttpCheck(config);
+        break;
     }
 
     res.json(result);
   } catch (error) {
-    console.error('Check error:', error);
-    res.status(500).json({
-      status: 'error',
-      error: error.message,
-      region: PROBE_REGION
-    });
+    console.error('[PROBE] Error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Info endpoint
-app.get('/', (req, res) => {
-  res.json({
-    name: 'StatusBeacon Probe',
-    version: '1.0.0',
-    region: PROBE_REGION,
-    endpoints: {
-      health: 'GET /health',
-      check: 'POST /check (requires auth)'
-    }
-  });
-});
-
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0', () => {
   console.log(`
-╔═══════════════════════════════════════════════════════╗
-║           StatusBeacon Probe v1.0.0                   ║
-╠═══════════════════════════════════════════════════════╣
-║  Port:   ${PORT.toString().padEnd(44)}║
-║  Region: ${PROBE_REGION.padEnd(44)}║
-║  Auth:   ${(PROBE_SECRET ? 'Enabled' : 'DISABLED (set PROBE_SECRET!)').padEnd(44)}║
-╚═══════════════════════════════════════════════════════╝
+╔═════════════════════════════════════════════════╗
+║       StatusBeacon Probe v1.0.0                   ║
+║  Port:   ${PORT.toString().padEnd(44)}                    ║
+╠═════════════════════════════════════════════╝
   `);
 });
