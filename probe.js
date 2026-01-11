@@ -124,61 +124,68 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
   const { url, method = 'GET', expectedStatus = 200, timeout = 30000, headers = {}, degradedThresholdMs, monitorId, enableCookies, cookieTtlSeconds, contentValidation } = config;
 
   const startTime = Date.now();
+
+  // Follow redirects and capture redirect chain
+  let redirectResult;
+  try {
+    redirectResult = await followRedirects(url, {
+      method: method,
+      headers: {
+        ...getHeadersObject('rotate'),
+        ...headers,
+      },
+      timeout: timeout * 1000,
+      maxRedirects: 10,
+    });
+  } catch (error: any) {
+    const responseTimeMs = Date.now() - startTime;
+    console.error(`[PROBE:${PROBE_REGION}] ${url}: Redirect tracking error:`, error.message);
+    return {
+      monitorId: config.monitorId,
+      region: PROBE_REGION,
+      status: 'down',
+      statusCode: null,
+      responseTimeMs,
+      errorMessage: error.message,
+      isGeoBlocked: false,
+      geoBlockingIndicators: [],
+      responseBody: undefined,
+      contentValidated: undefined,
+      contentHash: undefined,
+      validationErrors: undefined,
+      responseSize: undefined,
+    };
+  }
+
+  const { redirectCount, finalUrl, finalResponse, totalRedirectTime, redirectChain, isLoop, loopDetectedAt } = redirectResult;
+
+  let status: 'up' | 'down' | 'degraded' = 'up';
   let statusCode: number | null = null;
   let errorMessage: string | null = null;
   let responseBody: string | undefined;
 
+  // Extract data from final response
+  statusCode = finalResponse.statusCode;
+  const responseTimeMs = totalRedirectTime;
+
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), config.timeoutSeconds * 1000);
-
-    // Create custom agent if SSL errors should be ignored
-    const defaultHeaders = getHeadersObject('rotate');
-
-    // Prepare request headers
-    const requestHeaders = {
-      ...defaultHeaders,
-      ...headers,
-    };
-
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (isHttps ? 443 : 80),
-      path: parsedUrl.pathname + parsedUrl.search,
-      method,
-      timeout,
-      headers: requestHeaders,
-      rejectUnauthorized: !config.ignoreSslErrors,
-      agent: new https.Agent({ rejectUnauthorized: !config.ignoreSslErrors }),
-    };
-
-    const response = await fetch(url, options);
-
-    clearTimeout(timeoutId);
-    statusCode = response.status;
-
-    try {
-      responseBody = await response.text();
-    } catch {
-      responseBody = undefined;
-    }
-
-    if (config.expectedStatus && statusCode !== config.expectedStatus) {
-      status = 'down';
-      errorMessage = `Expected status ${config.expectedStatus}, got ${statusCode}`;
-    }
-  } catch (error) {
-    status = 'down';
-    errorMessage = error.name === 'AbortError' ? 'Request timeout' : error.message;
+    responseBody = finalResponse.body;
+  } catch {
+    responseBody = undefined;
   }
 
-  const responseTimeMs = Date.now() - startTime;
+  // Check expected status
+  const isRedirect = statusCode && statusCode >= 300 && statusCode < 400;
+  const shouldTreatRedirectAsUp = config.treatRedirectsAsUp && isRedirect;
 
-  if (config.expectedStatus && statusCode !== config.expectedStatus) {
+  if (config.expectedStatus && statusCode !== config.expectedStatus && !shouldTreatRedirectAsUp) {
     status = 'down';
     errorMessage = `Expected status ${config.expectedStatus}, got ${statusCode}`;
+  } else if (shouldTreatRedirectAsUp) {
+    console.log(`[PROBE:${PROBE_REGION}] Treating ${statusCode} redirect as UP (treatRedirectsAsUp enabled)`);
   }
 
+  // Check degraded threshold
   if (status === 'up' && config.degradedThresholdMs && responseTimeMs > config.degradedThresholdMs) {
     status = 'degraded';
     errorMessage = `Response time ${responseTimeMs}ms exceeded threshold ${config.degradedThresholdMs}ms`;
@@ -186,7 +193,7 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
 
   const geoBlockCheck = detectGeoBlocking(statusCode, errorMessage, responseBody);
 
-  console.log(`[PROBE:${PROBE_REGION}] ${config.url}: ${status} - ${responseTimeMs}ms${geoBlockCheck.isGeoBlocked ? ' [GEO-BLOCKED]' : ''}`);
+  console.log(`[PROBE:${PROBE_REGION}] ${config.url}: ${status} - ${responseTimeMs}ms (Redirects: ${redirectCount}, Final: ${finalUrl})${geoBlockCheck.isGeoBlocked ? ' [GEO-BLOCKED]' : ''}`);
 
   // Content validation (Phase 2.2) - only for HTTP checks with response body
   let contentValidated: boolean | undefined = undefined;
@@ -228,6 +235,9 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
     contentHash,
     validationErrors,
     responseSize,
+    redirectCount,
+    finalUrl,
+    redirectChain,
   };
 }
 
