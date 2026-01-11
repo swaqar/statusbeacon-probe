@@ -76,13 +76,18 @@ async function followRedirects(initialUrl, options = {}, maxRedirects = MAX_REDI
 
     // Check if Location header exists
     if (!hopResult.location) {
+      // No Location header - this is the final response (likely JS redirect or Cloudflare challenge)
+      // Return the current response as finalResponse so the probe can analyze it
       return {
         redirectCount,
         finalUrl: currentUrl,
         redirectChain,
         isLoop: false,
-        error: `Redirect status ${hopResult.statusCode} but no Location header`,
-        totalRedirectTime: totalTime
+        totalRedirectTime: totalTime,
+        finalStatusCode: hopResult.statusCode,
+        finalResponse: hopResult,
+        noLocationHeader: true, // Flag to indicate this was a redirect without Location
+        error: `Redirect status ${hopResult.statusCode} but no Location header`
       };
     }
 

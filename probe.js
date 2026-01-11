@@ -157,7 +157,7 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
     };
   }
 
-  const { redirectCount, finalUrl, finalResponse, totalRedirectTime, redirectChain, isLoop, loopDetectedAt } = redirectResult;
+  const { redirectCount, finalUrl, finalResponse, totalRedirectTime, redirectChain, isLoop, loopDetectedAt, noLocationHeader } = redirectResult;
 
   let status: 'up' | 'down' | 'degraded' = 'up';
   let statusCode: number | null = null;
@@ -165,24 +165,55 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
   let responseBody: string | undefined;
 
   // Extract data from final response
-  statusCode = finalResponse.statusCode;
+  statusCode = finalResponse?.statusCode || null;
   const responseTimeMs = totalRedirectTime;
 
   try {
-    responseBody = finalResponse.body;
+    responseBody = finalResponse?.body;
   } catch {
     responseBody = undefined;
+  }
+
+  // Check for Cloudflare/WAF challenge (302 without Location header)
+  // This typically means a JS-based redirect (Cloudflare challenge page)
+  const isJsRedirect = noLocationHeader && statusCode && statusCode >= 300 && statusCode < 400;
+
+  // Detect if response body contains Cloudflare/WAF indicators
+  let isCloudflareChallenge = false;
+  if (isJsRedirect && responseBody) {
+    const cfIndicators = [
+      'cf-browser-verification',
+      'cf_chl_opt',
+      'challenge-platform',
+      '__cf_chl',
+      'Just a moment',
+      'checking your browser',
+      'Cloudflare',
+      'Please Wait',
+      'DDoS protection'
+    ];
+    isCloudflareChallenge = cfIndicators.some(indicator =>
+      responseBody!.toLowerCase().includes(indicator.toLowerCase())
+    );
   }
 
   // Check expected status
   const isRedirect = statusCode && statusCode >= 300 && statusCode < 400;
   const shouldTreatRedirectAsUp = config.treatRedirectsAsUp && isRedirect;
 
-  if (config.expectedStatus && statusCode !== config.expectedStatus && !shouldTreatRedirectAsUp) {
+  // Auto-treat Cloudflare JS redirects as "reachable" (not down)
+  // The site IS responding, just with a challenge page
+  const isCloudflareReachable = isJsRedirect && (isCloudflareChallenge || statusCode === 302 || statusCode === 303);
+
+  if (config.expectedStatus && statusCode !== config.expectedStatus && !shouldTreatRedirectAsUp && !isCloudflareReachable) {
     status = 'down';
     errorMessage = `Expected status ${config.expectedStatus}, got ${statusCode}`;
   } else if (shouldTreatRedirectAsUp) {
     console.log(`[PROBE:${PROBE_REGION}] Treating ${statusCode} redirect as UP (treatRedirectsAsUp enabled)`);
+  } else if (isCloudflareReachable) {
+    // Site is reachable but showing Cloudflare/WAF challenge
+    console.log(`[PROBE:${PROBE_REGION}] Cloudflare/WAF challenge detected (${statusCode} without Location) - treating as UP`);
+    // Keep status as 'up' but note the challenge in detection metadata
   }
 
   // Check degraded threshold
@@ -193,7 +224,16 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
 
   const geoBlockCheck = detectGeoBlocking(statusCode, errorMessage, responseBody);
 
-  console.log(`[PROBE:${PROBE_REGION}] ${config.url}: ${status} - ${responseTimeMs}ms (Redirects: ${redirectCount}, Final: ${finalUrl})${geoBlockCheck.isGeoBlocked ? ' [GEO-BLOCKED]' : ''}`);
+  // Build challenge detection info
+  const challengeInfo = isCloudflareReachable ? {
+    detected: true,
+    type: isCloudflareChallenge ? 'cloudflare_challenge' : 'js_redirect',
+    statusCode,
+    noLocationHeader: true,
+    message: 'Site reachable but showing challenge page'
+  } : null;
+
+  console.log(`[PROBE:${PROBE_REGION}] ${config.url}: ${status} - ${responseTimeMs}ms (Redirects: ${redirectCount}, Final: ${finalUrl})${geoBlockCheck.isGeoBlocked ? ' [GEO-BLOCKED]' : ''}${isCloudflareReachable ? ' [CF-CHALLENGE]' : ''}`);
 
   // Content validation (Phase 2.2) - only for HTTP checks with response body
   let contentValidated: boolean | undefined = undefined;
@@ -230,6 +270,7 @@ async function performHttpCheck(config: ProbeRequest): Promise<ProbeResult> {
     errorMessage,
     isGeoBlocked: geoBlockCheck.isGeoBlocked,
     geoBlockingIndicators: geoBlockCheck.indicators,
+    challengeInfo,
     responseBody,
     contentValidated,
     contentHash,
